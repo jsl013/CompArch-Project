@@ -1,0 +1,2 @@
+# CompArch-Project
+SimpleScalar Simulator
