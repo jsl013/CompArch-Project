@@ -269,7 +269,9 @@ cache_create(char *name,		/* name of the cache */
       md_addr_t baddr, int bsize,
       struct cache_blk_t *blk,
       tick_t now),
-    unsigned int hit_latency)	/* latency in cycles for a hit */
+    unsigned int hit_latency,	/* latency in cycles for a hit */
+    unsigned int nmshr, /* number of MSHR entries */ 
+    unsigned int mshr_nmisses)	/* maximum misses per MSHR */
 {
   struct cache_t *cp;
   struct cache_blk_t *blk;
@@ -293,6 +295,10 @@ cache_create(char *name,		/* name of the cache */
     fatal("cache associativity `%d' must be a power of two", assoc);
   if (!blk_access_fn)
     fatal("must specify miss/replacement functions");
+  if (nmshr <= 0)
+    fatal("MSHR entry size `%d' must be non-zero", nmshr);
+  if (mshr_nmisses <= 0)
+    fatal("MSHR maximum misses per entry `%d' must be non-zero", mshr_nmisses);
 
   /* allocate the cache structure */
   cp = (struct cache_t *)
@@ -309,6 +315,15 @@ cache_create(char *name,		/* name of the cache */
   cp->assoc = assoc;
   cp->policy = policy;
   cp->hit_latency = hit_latency;
+
+  cp->nmshr = nmshr;
+  cp->mshr = (struct mshr_t *) calloc(nmshr, sizeof(struct mshr_t));
+  cp->mshr_nalloc = 0;
+  cp->mshr_nmisses = mshr_nmisses;
+  for (i=0; i<nmshr; i++) {
+    cp->mshr[i].bvalid = 0;
+    cp->mshr[i].nalloc = 0;
+  }
 
   /* miss/replacement functions */
   cp->blk_access_fn = blk_access_fn;
@@ -508,8 +523,12 @@ cache_access(struct cache_t *cp,	/* cache to access */
   byte_t *p = vp;
   md_addr_t tag = CACHE_TAG(cp, addr);
   md_addr_t set = CACHE_SET(cp, addr);
+  md_addr_t tagset = CACHE_TAGSET(cp, addr);
   md_addr_t bofs = CACHE_BLK(cp, addr);
   struct cache_blk_t *blk, *repl;
+  struct mshr_t *curr_mshr;
+  struct mshr_t *target_mshr = NULL;
+  int i = 0;
   int lat = 0;
 
   /* default replacement address */
@@ -529,7 +548,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* permissions are checked on cache misses */
 
   /* check for a fast hit: access to same block */
-  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL))
+  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (blk->ready < now))
   {
     /* hit in the same block */
     blk = cp->last_blk;
@@ -545,7 +564,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->hash_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready < now))
         goto cache_hit;
     }
   }
@@ -556,7 +575,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->way_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready < now))
         goto cache_hit;
     }
   }
@@ -565,6 +584,32 @@ cache_access(struct cache_t *cp,	/* cache to access */
 
   /* **MISS** */
   cp->misses++;
+
+  for (i=0; i<cp->nmshr; i++) {
+    curr_mshr = &(cp->mshr[i]);
+    if (curr_mshr->bvalid && curr_mshr->baddr == tagset) {
+      goto mshr_hit;
+    }
+    else if (curr_mshr->bvalid && curr_mshr->t_return < now) {
+      curr_mshr->bvalid = 0;
+      cp->mshr_nalloc = 0;
+    }
+    else if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
+      target_mshr = curr_mshr;
+    }
+  }
+
+  /* primary miss*/
+  if (target_mshr != NULL) {
+    target_mshr->bvalid = 1; // bvalid init! cache_create
+    target_mshr->baddr = tagset;
+    target_mshr->nalloc = 1;
+    cp->mshr_nalloc++;
+  }
+  else { /* structural-stall miss */
+    lat = CACHE_BLKED;
+    return lat;
+  }
 
   /* select the appropriate block to replace, and re-link this entry to
      the appropriate place in the way list */
@@ -648,6 +693,8 @@ cache_access(struct cache_t *cp,	/* cache to access */
   if (cp->hsize)
     link_htab_ent(cp, &cp->sets[set], repl);
 
+  target_mshr->t_return = now + lat;
+
   /* return latency of the operation */
   return lat;
 
@@ -716,6 +763,17 @@ cache_fast_hit: /* fast hit handler */
 
   /* return first cycle data is available to access */
   return (int) MAX(cp->hit_latency, (blk->ready - now));
+  
+mshr_hit:
+  /* secondary miss */
+  if (curr_mshr->nalloc < cp->mshr_nmisses) {
+    curr_mshr->nalloc++;
+    lat = BOUND_POS(curr_mshr->t_return - now);
+  }
+  else { /* structural-stall miss */
+    lat = CACHE_BLKED;
+  }
+  return lat;
 }
 
 /* return non-zero if block containing address ADDR is contained in cache

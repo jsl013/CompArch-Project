@@ -148,6 +148,16 @@ struct cache_set_t
 				   access to cache blocks */
 };
 
+#define CACHE_BLKED = -100
+
+struct mshr_t /* explicitly addressed MSHR */
+{
+  unsigned int bvalid;
+  md_addr_t baddr;
+  tick_t t_return;
+  unsigned int nalloc; /* number of MSHR entries allocated */
+};
+
 /* cache definition */
 struct cache_t
 {
@@ -160,6 +170,10 @@ struct cache_t
   int assoc;			/* cache associativity */
   enum cache_policy policy;	/* cache replacement policy */
   unsigned int hit_latency;	/* cache hit latency */
+  struct mshr_t *mshr;
+  unsigned int nmshr; /* total number of MSHR */
+  unsigned int mshr_nmisses; /* maximum misses per MSHR */
+  unsigned int mshr_nalloc; /* number of MSHR used */
 
   /* miss/replacement handler, read/write BSIZE bytes starting at BADDR
      from/into cache block BLK, returns the latency of the operation
@@ -229,7 +243,9 @@ cache_create(char *name,		/* name of the cache */
 					   md_addr_t baddr, int bsize,
 					   struct cache_blk_t *blk,
 					   tick_t now),
-	     unsigned int hit_latency);/* latency in cycles for a hit */
+	     unsigned int hit_latency, /* latency in cycles for a hit */
+       unsigned int nmshr, /* total number of MSHR */
+       unsigned int mshr_nmisses); /* maximum misses per MSHR */ 
 
 /* parse policy */
 enum cache_policy			/* replacement policy enum */
