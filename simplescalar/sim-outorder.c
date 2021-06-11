@@ -196,6 +196,9 @@ static char *cache_il2_opt;
 /* l2 instruction cache hit latency (in cycles) */
 static int cache_il2_lat;
 
+/* number of FMT entries */
+static int nfmt;
+
 /* flush caches on system calls */
 static int flush_on_syscalls;
 
@@ -360,6 +363,88 @@ static counter_t recovery_count = 0;
 
 /* total non-speculative bogus addresses seen (debug var) */
 static counter_t sim_invalid_addrs;
+
+/* FMT */
+static counter_t fmt_il1_miss_count = 0;
+static counter_t fmt_il2_miss_count = 0;
+static counter_t fmt_itlb_miss_count = 0;
+static counter_t fmt_dl1_miss_count = 0;
+static counter_t fmt_dl2_miss_count = 0;
+static counter_t fmt_dtlb_miss_count = 0;
+static counter_t fmt_bpenalty_count = 0;
+static counter_t fmt_funct_stall_count = 0;
+
+static int fmt_dispatch_head = -1;
+static int fmt_dispatch_tail = -1;
+static int fmt_fetch = 0;
+static int fmt_should_plus = 0;
+
+static int fmt_frontend_miss_flag;
+static int fmt_backend_miss_flag;
+
+#define CACHE_HIT     0x00000000
+#define L1_CACHE_MISS 0x00000001
+#define L2_CACHE_MISS 0x00000002
+#define TLB_MISS      0x00000004
+
+struct fmt_t
+{
+  int ruu_id;
+  int mispred;
+  counter_t bpenalty_count;
+  counter_t local_il1_count;
+  counter_t local_il2_count;
+  counter_t local_itlb_count;
+};
+/* default size : 16*/
+struct fmt_t fmt[16];
+
+static void fmt_init(void)
+{
+  for (int i=0; i<nfmt; i++) {
+    fmt[i].local_il1_count = 0;
+    fmt[i].local_il2_count = 0;
+    fmt[i].local_itlb_count = 0;
+  }
+}
+
+static int find_fmt_idx(int ruu_id) {
+  int i;
+  int fmt_idx = -1;
+  for (i = fmt_dispatch_head; i != fmt_dispatch_tail; i = (i+1) % nfmt) {
+    if (fmt[i].ruu_id == ruu_id) {
+      fmt_idx = i;
+      break;
+    }
+  }
+  return fmt_idx;
+}
+
+/* sFMT */
+static counter_t sfmt_il1_miss_count = 0;
+static counter_t sfmt_il2_miss_count = 0;
+static counter_t sfmt_itlb_miss_count = 0;
+static counter_t sfmt_dl1_miss_count = 0;
+static counter_t sfmt_dl2_miss_count = 0;
+static counter_t sfmt_dtlb_miss_count = 0;
+static counter_t sfmt_bpenalty_count = 0;
+static counter_t sfmt_funct_stall_count = 0;
+
+static counter_t local_il1_count = 0;
+static counter_t local_il2_count = 0;
+static counter_t local_itlb_count = 0;
+
+static int sfmt_dispatch_head = -1;
+static int sfmt_dispatch_tail = -1;
+static int sfmt_fetch = -1;
+
+struct sfmt_t
+{
+  int ruu_id;
+  int mispred;
+  counter_t bpenalty_count;
+};
+
 
 /*
  * simulator state variables
@@ -911,6 +996,11 @@ sim_reg_options(struct opt_odb_t *odb)
   opt_reg_flag(odb, "-bugcompat",
       "operate in backward-compatible bugs mode (for testing only)",
       &bugcompat_mode, /* default */FALSE, /* print */TRUE, NULL);
+
+  opt_reg_int(odb, "-fmt:nfmt",
+      "total number of FMT entries",
+      &nfmt, /* default */16,
+      /* print */TRUE, /* format */NULL);
 }
 
 /* check simulator-specific option values */
@@ -1482,6 +1572,7 @@ sim_load_prog(char *fname,		/* program to load */
   readyq_init();
   ruu_init();
   lsq_init();
+  fmt_init();
 
   /* initialize the DLite debugger */
   dlite_init(simoo_reg_obj, simoo_mem_obj, simoo_mstate_obj);
@@ -2181,6 +2272,8 @@ ruu_commit(void)
 {
   int i, lat, events, committed = 0;
   static counter_t sim_ret_insn = 0;
+  counter_t dl1_misses;
+  counter_t dl2_misses;
 
   /* all values must be retired to the architected reg file in program order */
   while (RUU_num > 0 && committed < ruu_commit_width)
@@ -2231,6 +2324,8 @@ ruu_commit(void)
           /* go to the data cache */
           if (cache_dl1)
           {
+            dl1_misses = cache_dl1->misses;
+            dl2_misses = cache_dl2->misses;
             /* commit store value to D-cache */
             lat =
               cache_access(cache_dl1, Write, (LSQ[LSQ_head].addr&~3),
@@ -2241,6 +2336,15 @@ ruu_commit(void)
               fu->master->busy = 0;
               break;
             }
+            if (dl1_misses < cache_dl1->misses) {
+              if (dl2_misses < cache_dl2->misses){
+                fmt_backend_miss_flag |= L2_CACHE_MISS;
+              }
+              else
+                fmt_backend_miss_flag |= L1_CACHE_MISS;
+            }
+            else
+              fmt_backend_miss_flag = CACHE_HIT;
           }
 
           /* all loads and stores must to access D-TLB */
@@ -2250,8 +2354,12 @@ ruu_commit(void)
             lat =
               cache_access(dtlb, Read, (LSQ[LSQ_head].addr & ~3),
                   NULL, 4, sim_cycle, NULL, NULL);
-            if (lat > 1)
+            if (lat > 1) {
               events |= PEV_TLBMISS;
+              fmt_backend_miss_flag |= TLB_MISS;
+            }
+            else 
+              fmt_backend_miss_flag = CACHE_HIT;
           }
         }
         else
@@ -2288,6 +2396,24 @@ ruu_commit(void)
           /* correct pred? */rs->pred_PC == rs->next_PC,
           /* opcode */rs->op,
           /* dir predictor update pointer */&rs->dir_update);
+    }
+
+    if (MD_OP_FLAGS(rs->op) & F_CTRL)
+    {
+      int fmt_index = find_fmt_idx(rs - RUU);
+      if (fmt_index == -1)
+        panic("There is no allocated branch inst in FMT"); 
+      else {
+        if (fmt[fmt_index].mispred) { /* branch misprediction */
+          fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
+          /* global branch misprediction penalty counter should be incremented until new inst enter RUU */
+          fmt_should_plus = 1;
+        }
+        fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
+        fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
+        fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
+        fmt_dispatch_head = (fmt_dispatch_head + 1) % nfmt;
+      }
     }
 
     /* invalidate RUU operation instance */
@@ -2336,7 +2462,7 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
 {
   int i, RUU_index = RUU_tail, LSQ_index = LSQ_tail;
   int RUU_prev_tail = RUU_tail, LSQ_prev_tail = LSQ_tail;
-
+  int fmt_index;
   /* recover from the tail of the RUU towards the head until the branch index
      is reached, this direction ensures that the LSQ can be synchronized with
      the RUU */
@@ -2344,6 +2470,21 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
   /* go to first element to squash */
   RUU_index = (RUU_index + (RUU_size-1)) % RUU_size;
   LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
+
+  /* FMT flush */
+  fmt_index = find_fmt_idx(branch_index); 
+  if (fmt_index == -1)
+    panic("There is no allocated branch inst in FMT"); 
+  /* flush the branches in a wrong path */
+  fmt[fmt_index].mispred = 1;
+  fmt_dispatch_tail = fmt_index;
+  fmt_fetch = (fmt_dispatch_tail + 1) % nfmt;
+  fmt[fmt_fetch].ruu_id = 0;
+  fmt[fmt_fetch].mispred = 0;
+  fmt[fmt_fetch].bpenalty_count = 0;
+  fmt[fmt_fetch].local_il1_count = 0;
+  fmt[fmt_fetch].local_il2_count = 0;
+  fmt[fmt_fetch].local_itlb_count = 0;
 
   /* traverse to older insts until the mispredicted branch is encountered */
   while (RUU_index != branch_index)
@@ -4104,6 +4245,13 @@ ruu_dispatch(void)
           /* could not issue this inst, stall issue until we can */
           RSLINK_INIT(last_op, rs);
         }
+        
+        /* branch inst */
+        if (MD_OP_FLAGS(op) & F_CTRL)
+        {
+          fmt_dispatch_tail = (fmt_dispatch_tail + 1) % nfmt; // assume first fetch, first dispatch
+          fmt[fmt_dispatch_tail].ruu_id = rs - RUU;
+        }
       }
     }
     else
@@ -4182,6 +4330,8 @@ ruu_dispatch(void)
     /* consume instruction from IFETCH -> DISPATCH queue */
     fetch_head = (fetch_head+1) & (ruu_ifq_size - 1);
     fetch_num--;
+    /* new inst enters the DISPATCH queue */
+    fmt_should_plus = 0;
 
     /* check for DLite debugger entry condition */
     made_check = TRUE;
@@ -4271,6 +4421,9 @@ ruu_fetch(void)
   md_inst_t inst;
   int stack_recover_idx;
   int branch_cnt;
+  counter_t il1_misses;
+  counter_t il2_misses;
+/* counter_t itlb_misses; */
   enum md_opcode op;
 
   for (i=0, branch_cnt=0;
@@ -4298,29 +4451,46 @@ ruu_fetch(void)
       if (cache_il1)
       {
         /* access the I-cache */
+        il1_misses = cache_il1->misses;
+        il2_misses = cache_il2->misses;
         lat =
           cache_access(cache_il1, Read, IACOMPRESS(fetch_regs_PC),
               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
               NULL, NULL);
         if (lat > cache_il1_lat)
           last_inst_missed = TRUE;
+        if (il1_misses < cache_il1->misses) {
+          if (il2_misses < cache_il2->misses)
+            // L2 I-cache miss
+            fmt_frontend_miss_flag |= L2_CACHE_MISS;
+          else
+            fmt_frontend_miss_flag |= L1_CACHE_MISS;
+        }
+        else 
+          fmt_frontend_miss_flag = CACHE_HIT;
       }
 
       if (itlb)
       {
         /* access the I-TLB, NOTE: this code will initiate
            speculative TLB misses */
+        /* itlb_misses = itlb->misses; */
         tlb_lat =
           cache_access(itlb, Read, IACOMPRESS(fetch_regs_PC),
               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
               NULL, NULL);
-        if (tlb_lat > 1)
+        if (tlb_lat > 1) {
           last_inst_tmissed = TRUE;
+          fmt_frontend_miss_flag |= TLB_MISS;
+        }
+        else
+          fmt_frontend_miss_flag = CACHE_HIT;
 
         /* I-cache/I-TLB accesses occur in parallel */
         lat = MAX(tlb_lat, lat);
       }
 
+      /* I-cache/I-TLB miss */
       /* I-cache/I-TLB miss? assumes I-cache hit >= I-TLB hit */
       if (lat != cache_il1_lat)
       {
@@ -4347,7 +4517,7 @@ ruu_fetch(void)
       /* get the next predicted fetch address; only use branch predictor
          result for branches (assumes pre-decode bits); NOTE: returned
          value may be 1 if bpred can only predict a direction */
-      if (MD_OP_FLAGS(op) & F_CTRL)
+      if (MD_OP_FLAGS(op) & F_CTRL) {
         fetch_pred_PC =
           bpred_lookup(pred,
               /* branch address */fetch_regs_PC,
@@ -4357,6 +4527,18 @@ ruu_fetch(void)
               /* return? */MD_IS_RETURN(op),
               /* updt */&(fetch_data[fetch_tail].dir_update),
               /* RSB index */&stack_recover_idx);
+
+        fmt_fetch = (fmt_fetch + 1) % nfmt;
+        if (fmt_fetch == fmt_dispatch_head)
+          panic("FMT is full");
+
+        fmt[fmt_fetch].ruu_id = 0;
+        fmt[fmt_fetch].mispred = 0;
+        fmt[fmt_fetch].bpenalty_count = 0;
+        fmt[fmt_fetch].local_il1_count = 0;
+        fmt[fmt_fetch].local_il2_count = 0;
+        fmt[fmt_fetch].local_itlb_count = 0;
+      }
       else
         fetch_pred_PC = 0;
 
@@ -4655,8 +4837,39 @@ sim_main(void)
     /* call instruction fetch unit if it is not blocked */
     if (!ruu_fetch_issue_delay)
       ruu_fetch();
-    else
+    else {
       ruu_fetch_issue_delay--;
+    }
+
+    /* if fetch is successfully done, it should be CACHE_HIT */
+    if (fmt_frontend_miss_flag & TLB_MISS)
+      fmt[fmt_fetch].local_itlb_count++;
+    else if (fmt_frontend_miss_flag & L2_CACHE_MISS)
+      fmt[fmt_fetch].local_il2_count++;
+    else if (fmt_frontend_miss_flag & L1_CACHE_MISS)
+      fmt[fmt_fetch].local_il1_count++;
+
+    /* branch miss penalty */
+    if (fmt_should_plus) {
+      fmt_bpenalty_count++;
+    }
+
+    /* long backend misses or long latency misses of RUU head */
+    if (RUU_num == RUU_size) {
+      if (fmt_backend_miss_flag & TLB_MISS)
+        fmt_dtlb_miss_count++;
+      else if (fmt_backend_miss_flag & L2_CACHE_MISS)
+        fmt_dl1_miss_count++;
+      else if (fmt_backend_miss_flag & L1_CACHE_MISS)
+        fmt_dl2_miss_count++;
+      else 
+        fmt_funct_stall_count++;
+    }
+    else { /* if RUU is not full, increment branch counters in RUU */
+      for (int i=fmt_dispatch_head; i!=fmt_dispatch_tail; i=(i+1)%nfmt) {
+        fmt[i].bpenalty_count++;
+      }
+    }
 
     /* update buffer occupancy stats */
     IFQ_count += fetch_num;
