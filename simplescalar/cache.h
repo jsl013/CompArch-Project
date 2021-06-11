@@ -148,7 +148,7 @@ struct cache_set_t
 				   access to cache blocks */
 };
 
-#define CACHE_BLKED = -100
+#define CACHE_BLKED -100
 
 struct mshr_t /* explicitly addressed MSHR */
 {

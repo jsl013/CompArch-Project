@@ -548,11 +548,13 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* permissions are checked on cache misses */
 
   /* check for a fast hit: access to same block */
-  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (blk->ready < now))
+  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->ready < now))
   {
-    /* hit in the same block */
-    blk = cp->last_blk;
-    goto cache_fast_hit;
+    if (cp->last_blk->ready < now) {
+      /* hit in the same block */
+      blk = cp->last_blk;
+      goto cache_fast_hit;
+    }
   }
 
   if (cp->hsize)
