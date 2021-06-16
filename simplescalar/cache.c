@@ -548,9 +548,9 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* permissions are checked on cache misses */
 
   /* check for a fast hit: access to same block */
-  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->ready < now))
+  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->ready <= now))
   {
-    if (cp->last_blk->ready < now) {
+    if (cp->last_blk->ready <= now) {
       /* hit in the same block */
       blk = cp->last_blk;
       goto cache_fast_hit;
@@ -566,7 +566,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->hash_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready < now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
         goto cache_hit;
     }
   }
@@ -577,7 +577,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->way_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready < now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
         goto cache_hit;
     }
   }
@@ -586,31 +586,33 @@ cache_access(struct cache_t *cp,	/* cache to access */
 
   /* **MISS** */
   cp->misses++;
+  
+  if (cp->nmshr) {
+    for (i=0; i<cp->nmshr; i++) {
+      curr_mshr = &(cp->mshr[i]);
+      if (curr_mshr->bvalid && curr_mshr->baddr == tagset) {
+        goto mshr_hit;
+      }
+      else if (curr_mshr->bvalid && curr_mshr->t_return <= now) {
+        curr_mshr->bvalid = 0;
+        cp->mshr_nalloc = 0;
+      }
+      else if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
+        target_mshr = curr_mshr;
+      }
+    }
 
-  for (i=0; i<cp->nmshr; i++) {
-    curr_mshr = &(cp->mshr[i]);
-    if (curr_mshr->bvalid && curr_mshr->baddr == tagset) {
-      goto mshr_hit;
+    /* primary miss*/
+    if (target_mshr != NULL) {
+      target_mshr->bvalid = 1; // bvalid init! cache_create
+      target_mshr->baddr = tagset;
+      target_mshr->nalloc = 1;
+      cp->mshr_nalloc++;
     }
-    else if (curr_mshr->bvalid && curr_mshr->t_return < now) {
-      curr_mshr->bvalid = 0;
-      cp->mshr_nalloc = 0;
+    else { /* structural-stall miss */
+      lat = CACHE_BLKED;
+      return lat;
     }
-    else if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
-      target_mshr = curr_mshr;
-    }
-  }
-
-  /* primary miss*/
-  if (target_mshr != NULL) {
-    target_mshr->bvalid = 1; // bvalid init! cache_create
-    target_mshr->baddr = tagset;
-    target_mshr->nalloc = 1;
-    cp->mshr_nalloc++;
-  }
-  else { /* structural-stall miss */
-    lat = CACHE_BLKED;
-    return lat;
   }
 
   /* select the appropriate block to replace, and re-link this entry to
@@ -695,7 +697,9 @@ cache_access(struct cache_t *cp,	/* cache to access */
   if (cp->hsize)
     link_htab_ent(cp, &cp->sets[set], repl);
 
-  target_mshr->t_return = now + lat;
+  if (cp->nmshr) {
+    target_mshr->t_return = now + lat;
+  }
 
   /* return latency of the operation */
   return lat;
