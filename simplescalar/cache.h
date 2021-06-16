@@ -244,8 +244,8 @@ cache_create(char *name,		/* name of the cache */
 					   struct cache_blk_t *blk,
 					   tick_t now),
 	     unsigned int hit_latency, /* latency in cycles for a hit */
-       unsigned int nmshr, /* total number of MSHR */
-       unsigned int mshr_nmisses); /* maximum misses per MSHR */ 
+       int nmshr, /* total number of MSHR */
+       int mshr_nmisses); /* maximum misses per MSHR */ 
 
 /* parse policy */
 enum cache_policy			/* replacement policy enum */

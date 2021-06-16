@@ -270,8 +270,8 @@ cache_create(char *name,		/* name of the cache */
       struct cache_blk_t *blk,
       tick_t now),
     unsigned int hit_latency,	/* latency in cycles for a hit */
-    unsigned int nmshr, /* number of MSHR entries */ 
-    unsigned int mshr_nmisses)	/* maximum misses per MSHR */
+    int nmshr, /* number of MSHR entries */ 
+    int mshr_nmisses)	/* maximum misses per MSHR */
 {
   struct cache_t *cp;
   struct cache_blk_t *blk;
@@ -295,10 +295,10 @@ cache_create(char *name,		/* name of the cache */
     fatal("cache associativity `%d' must be a power of two", assoc);
   if (!blk_access_fn)
     fatal("must specify miss/replacement functions");
-  if (nmshr <= 0)
-    fatal("MSHR entry size `%d' must be non-zero", nmshr);
-  if (mshr_nmisses <= 0)
-    fatal("MSHR maximum misses per entry `%d' must be non-zero", mshr_nmisses);
+  if (nmshr < 0)
+    fatal("MSHR entry size `%d' must be zero or positive", nmshr);
+  if (mshr_nmisses < 0)
+    fatal("MSHR maximum misses per entry `%d' must be zero or positive", mshr_nmisses);
 
   /* allocate the cache structure */
   cp = (struct cache_t *)
