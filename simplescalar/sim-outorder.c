@@ -5069,7 +5069,6 @@ sim_main(void)
 
     /* long backend misses or long latency misses of RUU head */
 /* if (RUU_num == RUU_size) { */
-/* struct RUU_station *rs = &(RUU[RUU_head]); */
 /* if (backend_miss_flag & TLB_MISS) { */
 /* fmt_dtlb_miss_count++; */
 /* sfmt_dtlb_miss_count++; */
@@ -5106,7 +5105,7 @@ sim_main(void)
         sfmt_funct_stall_count++;
       }
     }
-    else { /* if RUU is not full, increment branch counters in RUU */
+    else if (curr_nfmt > 0){ /* if RUU is not full, increment branch counters in RUU */
       int i = (fmt_dispatch_head + 1) % nfmt;
       for (;;) {
         fmt[i].bpenalty_count++;
