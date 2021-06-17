@@ -97,6 +97,9 @@ static unsigned int max_insts;
 /* number of insts skipped before timing starts */
 static int fastfwd_count;
 
+/* number of insts skipped before timing starts */
+static int warmup_count;
+
 /* pipeline trace range and output filename */
 static int ptrace_nelt = 0;
 static char *ptrace_opts[2];
@@ -360,13 +363,13 @@ static tick_t sim_cycle = 0;
 /* static int dtlb_miss_penalty = 30; */
 /* static int branch_mispred_penalty = 2; */
 
-static int naive_il1_miss_count = 0;
-static int naive_il2_miss_count = 0;
-static int naive_itlb_miss_count = 0;
-static int naive_dl1_miss_count = 0;
-static int naive_dl2_miss_count = 0;
-static int naive_dtlb_miss_count = 0;
-static int naive_branch_mispred_count = 0;
+static counter_t naive_il1_miss_count = 0;
+static counter_t naive_il2_miss_count = 0;
+static counter_t naive_itlb_miss_count = 0;
+static counter_t naive_dl1_miss_count = 0;
+static counter_t naive_dl2_miss_count = 0;
+static counter_t naive_dtlb_miss_count = 0;
+static counter_t naive_branch_mispred_count = 0;
 
 /* CPI stack */
 static counter_t cpi_stack = 0;
@@ -742,6 +745,9 @@ sim_reg_options(struct opt_odb_t *odb)
 
   opt_reg_int(odb, "-fastfwd", "number of insts skipped before timing starts",
       &fastfwd_count, /* default */0,
+      /* print */TRUE, /* format */NULL);
+  opt_reg_int(odb, "-warmup", "number of insts skipped before timing starts",
+      &warmup_count, /* default */0,
       /* print */TRUE, /* format */NULL);
   opt_reg_string_list(odb, "-ptrace",
       "generate pipetrace, i.e., <fname|stdout|stderr> <range>",
@@ -1498,31 +1504,46 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
       &fmt_itlb_miss_count, /* initial value */0, /* format */NULL);
   stat_reg_counter(sdb, "FMT_dl1", "FMT L1 D-cache miss counts",
       &fmt_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_dl2", "FMT L1 D-cache miss counts",
+  stat_reg_counter(sdb, "FMT_dl2", "FMT L2 D-cache miss counts",
       &fmt_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_dtlb", "FMT L1 D-TLB miss counts",
+  stat_reg_counter(sdb, "FMT_dtlb", "FMT D-TLB miss counts",
       &fmt_dtlb_miss_count, /* initial value */0, /* format */NULL);
   stat_reg_counter(sdb, "FMT_bpenalty", "FMT branch mispredict penalty counts",
       &fmt_bpenalty_count, /* initial value */0, /* format */NULL);
   stat_reg_counter(sdb, "FMT_funct_stall", "FMT functional unit stall counts",
       &fmt_funct_stall_count, /* initial value */0, /* format */NULL);
 
-  stat_reg_formula(sdb, "fmt_il1_rate", "FMT L1 I-cache miss rate",
-      "fmt_il1_miss_count / sim_num_insn", NULL);
-  stat_reg_formula(sdb, "FMT_il2_rate", "FMT L2 I-cache miss rate",
-      "fmt_il2_miss_count", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_itlb_rate", "FMT I-TLB miss rate",
-      "fmt_itlb_miss_count / cpi_stack", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_dl1_rate", "FMT L1 D-cache miss rate",
-      "fmt_dl1_miss_count / cpi_stack", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_dl2_rate", "FMT L2 D-cache miss rate",
-      "fmt_dl2_miss_count / cpi_stack", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_dtlb_rate", "FMT D-TLB miss rate",
-      "fmt_dtlb_miss_count / cpi_stack", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_bpenalty_rate", "FMT branch mispredict penalty rate",
-      "fmt_bpenalty_count / cpi_stack", /* format */NULL);
-  stat_reg_formula(sdb, "FMT_funct_stall_rate", "FMT functional unit stall rate",
-      "fmt_funct_stall_count / cpi_stack", /* format */NULL);
+  stat_reg_counter(sdb, "naive_il1", "naive L1 I-cache miss counts",
+      &naive_il1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_il2", "naive L2 I-cache miss counts",
+      &naive_il2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_itlb", "naive I-TLB miss counts",
+      &naive_itlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dl1", "naive L1 D-cache miss counts",
+      &naive_dl1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dl2", "naive L2 D-cache miss counts",
+      &naive_dl2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dtlb", "naive D-TLB miss counts",
+      &naive_dtlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_bpenalty", "naive branch mispredict penalty counts",
+      &naive_branch_mispred_count, /* initial value */0, /* format */NULL);
+
+//  stat_reg_formula(sdb, "fmt_il1_rate", "FMT L1 I-cache miss rate",
+//      "fmt_il1_miss_count / sim_num_insn", NULL);
+//  stat_reg_formula(sdb, "FMT_il2_rate", "FMT L2 I-cache miss rate",
+//      "fmt_il2_miss_count", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_itlb_rate", "FMT I-TLB miss rate",
+//      "fmt_itlb_miss_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dl1_rate", "FMT L1 D-cache miss rate",
+//      "fmt_dl1_miss_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dl2_rate", "FMT L2 D-cache miss rate",
+//      "fmt_dl2_miss_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dtlb_rate", "FMT D-TLB miss rate",
+//      "fmt_dtlb_miss_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_bpenalty_rate", "FMT branch mispredict penalty rate",
+//      "fmt_bpenalty_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_funct_stall_rate", "FMT functional unit stall rate",
+//      "fmt_funct_stall_count / cpi_stack", /* format */NULL);
 
   /* sFMT stats */
   stat_reg_counter(sdb, "sFMT il1", "sFMT L1 I-cache miss counts",
@@ -2518,39 +2539,38 @@ ruu_commit(void)
         panic("There is no allocated branch inst in FMT/sFMT"); 
       else {
         if (fmt[fmt_index].mispred) { /* branch misprediction */
-          fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
+          if (sim_num_insn > warmup_count)
+            fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
           /* global branch misprediction penalty counter should be incremented until new inst enter RUU */
           fmt_should_plus = 1;
         }
         if (sfmt[sfmt_index].mispred) {
-          sfmt_bpenalty_count += sfmt[sfmt_index].bpenalty_count;
+          if (sim_num_insn > warmup_count)
+            sfmt_bpenalty_count += sfmt[sfmt_index].bpenalty_count;
           sfmt_local_itlb_count = 0;
           sfmt_local_il1_count = 0;
           sfmt_local_il2_count = 0;
           sfmt_should_plus = 1;
-
-          /* clear sFMT */
-/* sfmt_dispatch_head = nsfmt - 1; */
-/* sfmt_dispatch_tail = nsfmt - 1; */
-/* sfmt_fetch = 0; */
-/* sfmt[sfmt_fetch].mispred = FALSE; */
-/* sfmt[sfmt_fetch].bpenalty_count = 0; */
         }
         sfmt_dispatch_head = (sfmt_dispatch_head + 1) % nsfmt;
         curr_nsfmt--;
 
-        fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
-        fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
-        fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
+        if (sim_num_insn > warmup_count) {
+          fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
+          fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
+          fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
+        }
         fmt_dispatch_head = (fmt_dispatch_head + 1) % nfmt;
         curr_nfmt--;
       }
     }
 
     if (rs->frontend_miss_flag) {
-      sfmt_itlb_miss_count += sfmt_local_itlb_count;
-      sfmt_il1_miss_count += sfmt_local_il1_count;
-      sfmt_il2_miss_count += sfmt_local_il2_count;
+      if (sim_num_insn > warmup_count) {
+        sfmt_itlb_miss_count += sfmt_local_itlb_count;
+        sfmt_il1_miss_count += sfmt_local_il1_count;
+        sfmt_il2_miss_count += sfmt_local_il2_count;
+      }
       sfmt_local_itlb_count = 0;
       sfmt_local_il1_count = 0;
       sfmt_local_il2_count = 0;
@@ -5038,7 +5058,7 @@ sim_main(void)
 
     /* call instruction fetch unit if it is not blocked */
     if (!ruu_fetch_issue_delay) {
-      frontend_miss_flag = 0;
+      frontend_miss_flag = CACHE_HIT;
       ruu_fetch();
     }
     else {
@@ -5060,11 +5080,13 @@ sim_main(void)
     }
 
     /* branch miss penalty */
-/* if (fmt_should_plus) { */
-/* fmt_bpenalty_count++; */
-/* } */
-    if (sfmt_should_plus) {
-      sfmt_bpenalty_count++;
+    if (sim_num_insn > warmup_count) {
+      if (fmt_should_plus) {
+        fmt_bpenalty_count++;
+      }
+      if (sfmt_should_plus) {
+        sfmt_bpenalty_count++;
+      }
     }
 
     /* long backend misses or long latency misses of RUU head */
@@ -5087,22 +5109,24 @@ sim_main(void)
 /* } */
 /* } */
     if (RUU_num == RUU_size) {
-      struct RUU_station *rs = &(RUU[RUU_head]);
-      if (rs->backend_miss_flag & TLB_MISS) {
-        fmt_dtlb_miss_count++;
-        sfmt_dtlb_miss_count++;
-      }
-      else if (rs->backend_miss_flag & L2_CACHE_MISS) {
-        fmt_dl1_miss_count++;
-        sfmt_dl1_miss_count++;
-      }
-      else if (rs->backend_miss_flag & L1_CACHE_MISS) {
-        fmt_dl2_miss_count++;
-        sfmt_dl2_miss_count++;
-      }
-      else {
-        fmt_funct_stall_count++;
-        sfmt_funct_stall_count++;
+      if (sim_num_insn > warmup_count) {
+        struct RUU_station *rs = &(RUU[RUU_head]);
+        if (rs->backend_miss_flag & TLB_MISS) {
+          fmt_dtlb_miss_count++;
+          sfmt_dtlb_miss_count++;
+        }
+        else if (rs->backend_miss_flag & L2_CACHE_MISS) {
+          fmt_dl1_miss_count++;
+          sfmt_dl1_miss_count++;
+        }
+        else if (rs->backend_miss_flag & L1_CACHE_MISS) {
+          fmt_dl2_miss_count++;
+          sfmt_dl2_miss_count++;
+        }
+        else {
+          fmt_funct_stall_count++;
+          sfmt_funct_stall_count++;
+        }
       }
     }
     else if (curr_nfmt > 0){ /* if RUU is not full, increment branch counters in RUU */
@@ -5120,8 +5144,8 @@ sim_main(void)
       }
     }
 
-    if (RUU_num < RUU_size)
-      backend_miss_flag = CACHE_HIT;
+/* if (RUU_num < RUU_size) */
+/* backend_miss_flag = CACHE_HIT; */
 
     /* update buffer occupancy stats */
     IFQ_count += fetch_num;
