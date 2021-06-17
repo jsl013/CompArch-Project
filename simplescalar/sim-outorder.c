@@ -422,7 +422,7 @@ struct fmt_t
   counter_t local_il1_count;
   counter_t local_il2_count;
   counter_t local_itlb_count;
-} fmt[16];
+} fmt[256];
 /* default size : 16*/
 
 static void fmt_init(void)
@@ -435,13 +435,15 @@ static void fmt_init(void)
 }
 
 static int find_fmt_idx(int ruu_id) {
-  int i;
+  int i = (fmt_dispatch_head + 1) % nfmt;
   int fmt_idx = -1;
-  for (i = (fmt_dispatch_head + 1) % nfmt; i != (fmt_dispatch_tail+1)%nfmt; i = (i+1) % nfmt) {
+  for (;;) {
     if (fmt[i].ruu_id == ruu_id) {
       fmt_idx = i;
       break;
     }
+    else if (i == fmt_dispatch_tail) break;
+    else i = (i+1)%nfmt;
   }
   return fmt_idx;
 }
@@ -457,7 +459,7 @@ static counter_t sfmt_dtlb_miss_count = 0;
 static counter_t sfmt_bpenalty_count = 0;
 static counter_t sfmt_funct_stall_count = 0;
 
-static int sfmt_frontend_miss_flag;
+/* static int sfmt_frontend_miss_flag; */
 
 /* local counters */
 static counter_t sfmt_local_il1_count = 0;
@@ -477,7 +479,7 @@ struct sfmt_t
   int ruu_id;
   int mispred;
   counter_t bpenalty_count;
-} sfmt[16];
+} sfmt[256];
 
 static int find_sfmt_idx(int ruu_id) {
   int i;
@@ -1044,12 +1046,12 @@ sim_reg_options(struct opt_odb_t *odb)
 
   opt_reg_int(odb, "-fmt:nfmt",
       "total number of FMT entries",
-      &nfmt, /* default */16,
+      &nfmt, /* default */128,
       /* print */TRUE, /* format */NULL);
 
   opt_reg_int(odb, "-sfmt:nsfmt",
       "total number of sFMT entries",
-      &nsfmt, /* default */16,
+      &nsfmt, /* default */128,
       /* print */TRUE, /* format */NULL);
 }
 
@@ -1766,6 +1768,7 @@ struct RUU_station {
      operands are known to be read (see lsq_refresh() for details on
      enforcing memory dependencies) */
   int idep_ready[MAX_IDEPS];		/* input operand ready? */
+  int backend_miss_flag; /* D-cache/D-TLB miss bit for sFMT */
   int frontend_miss_flag; /* I-cache/I-TLB miss bit for sFMT */
 };
 
@@ -2445,10 +2448,12 @@ ruu_commit(void)
             if (dl1_misses < cache_dl1->misses) {
               if (dl2_misses < cache_dl2->misses){
                 backend_miss_flag |= L2_CACHE_MISS;
+                rs->backend_miss_flag = L2_CACHE_MISS;
                 naive_dl2_miss_count++;
               }
               else {
                 backend_miss_flag |= L1_CACHE_MISS;
+                rs->backend_miss_flag = L1_CACHE_MISS;
                 naive_dl1_miss_count++;
               }
             }
@@ -2464,6 +2469,7 @@ ruu_commit(void)
             if (lat > 1) {
               events |= PEV_TLBMISS;
               backend_miss_flag |= TLB_MISS;
+              rs->backend_miss_flag = TLB_MISS;
               naive_dtlb_miss_count++;
             }
           }
@@ -2506,8 +2512,8 @@ ruu_commit(void)
 
     if (MD_OP_FLAGS(rs->op) & F_CTRL)
     {
-      int fmt_index = (fmt_dispatch_head +1)%nfmt; /* it should be fmt_dispatch_head + 1*/
-      int sfmt_index = (sfmt_dispatch_head +1)%nsfmt; /* it should be sfmt_dispatch_head + 1*/
+      int fmt_index = (fmt_dispatch_head + 1) % nfmt; /* it should be fmt_dispatch_head + 1*/
+      int sfmt_index = (sfmt_dispatch_head + 1) % nsfmt; /* it should be sfmt_dispatch_head + 1*/
       if (fmt_index == -1 || sfmt_index == -1)
         panic("There is no allocated branch inst in FMT/sFMT"); 
       else {
@@ -2530,10 +2536,9 @@ ruu_commit(void)
 /* sfmt[sfmt_fetch].mispred = FALSE; */
 /* sfmt[sfmt_fetch].bpenalty_count = 0; */
         }
-/* else { */
         sfmt_dispatch_head = (sfmt_dispatch_head + 1) % nsfmt;
         curr_nsfmt--;
-/* } */
+
         fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
         fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
         fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
@@ -2549,8 +2554,8 @@ ruu_commit(void)
       sfmt_local_itlb_count = 0;
       sfmt_local_il1_count = 0;
       sfmt_local_il2_count = 0;
-      for (int i=RUU_head; i!=(RUU_tail+1)%RUU_size; i=(i+1)%RUU_size) {
-        RUU[i].frontend_miss_flag = 0;
+      for (int i=0; i<RUU_num; ++i) {
+        RUU[(RUU_head+i)%RUU_size].frontend_miss_flag = 0;
       }
     }
 
@@ -2616,6 +2621,12 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
     panic("There is no allocated branch inst in FMT/sFMT"); 
   /* flush the branches in a wrong path */
   fmt[fmt_index].mispred = 1;
+  if (fmt_index < fmt_dispatch_head) {
+    curr_nfmt = nfmt - fmt_dispatch_head + fmt_index;
+  }
+  else {
+    curr_nfmt = fmt_index - fmt_dispatch_head;
+  }
   fmt_dispatch_tail = fmt_index;
   fmt_fetch = (fmt_dispatch_tail + 1) % nfmt;
   fmt[fmt_fetch].ruu_id = 0;
@@ -2624,13 +2635,20 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
   fmt[fmt_fetch].local_il1_count = 0;
   fmt[fmt_fetch].local_il2_count = 0;
   fmt[fmt_fetch].local_itlb_count = 0;
+  
 
   sfmt[sfmt_index].mispred = 1;
+  if (sfmt_index < sfmt_dispatch_head) {
+    curr_nsfmt = nsfmt - sfmt_dispatch_head + sfmt_index;
+  }
+  else {
+    curr_nsfmt = sfmt_index - sfmt_dispatch_head;
+  }
   sfmt_dispatch_tail = sfmt_index;
+  sfmt_fetch = (sfmt_dispatch_tail + 1) % nsfmt;
   sfmt[sfmt_fetch].ruu_id = 0;
   sfmt[sfmt_fetch].mispred = 0;
   sfmt[sfmt_fetch].bpenalty_count = 0;
-  sfmt_fetch = (sfmt_dispatch_tail + 1) % nsfmt;
 
   naive_branch_mispred_count++;
 
@@ -4080,6 +4098,9 @@ ruu_dispatch(void)
       /* on an acceptable trace path */
       && (ruu_include_spec || !spec_mode))
   {
+/* reset the backend miss flag if new dispatch is able */
+/* backend_miss_flag = CACHE_HIT; */
+
     /* if issuing in-order, block until last op issues if inorder issue */
     if (ruu_inorder_issue
         && (last_op.rs && RSLINK_VALID(&last_op)
@@ -4286,9 +4307,15 @@ ruu_dispatch(void)
       rs->seq = ++inst_seq;
       rs->queued = rs->issued = rs->completed = FALSE;
       rs->ptrace_seq = pseq;
-      if (sfmt_frontend_miss_flag != CACHE_HIT) {
-        rs->frontend_miss_flag = 1;
-        sfmt_frontend_miss_flag = 0;
+/* if (sfmt_frontend_miss_flag != CACHE_HIT) { */
+/* rs->frontend_miss_flag = 1; */
+/* sfmt_frontend_miss_flag = 0; */
+/* } */
+      if (ruu_fetch_issue_delay == 0) {
+        rs->frontend_miss_flag = TRUE;
+      }
+      else {
+        rs->frontend_miss_flag = FALSE;
       }
 
       /* split ld/st's into two operations: eff addr comp + mem access */
@@ -4622,12 +4649,12 @@ ruu_fetch(void)
           if (il2_misses < cache_il2->misses) {
             // L2 I-cache miss
             frontend_miss_flag = L2_CACHE_MISS;
-            sfmt_frontend_miss_flag = L2_CACHE_MISS;
+/* sfmt_frontend_miss_flag = L2_CACHE_MISS; */
             naive_il2_miss_count++;
           }
           else {
             frontend_miss_flag = L1_CACHE_MISS;
-            sfmt_frontend_miss_flag = L1_CACHE_MISS;
+/* sfmt_frontend_miss_flag = L1_CACHE_MISS; */
             naive_il1_miss_count++;
           }
         }
@@ -4647,7 +4674,7 @@ ruu_fetch(void)
         if (tlb_lat > 1) {
           last_inst_tmissed = TRUE;
           frontend_miss_flag = TLB_MISS;
-          sfmt_frontend_miss_flag = TLB_MISS;
+/* sfmt_frontend_miss_flag = TLB_MISS; */
           naive_itlb_miss_count++;
         }
 /* else */
@@ -4695,9 +4722,9 @@ ruu_fetch(void)
               /* updt */&(fetch_data[fetch_tail].dir_update),
               /* RSB index */&stack_recover_idx);
 
-        fmt_fetch = (fmt_fetch + 1) % nfmt;
-        if (fmt_fetch == (fmt_dispatch_head + 1) % nfmt)
+        if (fmt_fetch == fmt_dispatch_head)
           panic("FMT is full");
+        fmt_fetch = (fmt_fetch + 1) % nfmt;
 
         fmt[fmt_fetch].ruu_id = 0;
         fmt[fmt_fetch].mispred = 0;
@@ -5033,24 +5060,44 @@ sim_main(void)
     }
 
     /* branch miss penalty */
-    if (fmt_should_plus) {
-      fmt_bpenalty_count++;
-    }
+/* if (fmt_should_plus) { */
+/* fmt_bpenalty_count++; */
+/* } */
     if (sfmt_should_plus) {
       sfmt_bpenalty_count++;
     }
 
     /* long backend misses or long latency misses of RUU head */
+/* if (RUU_num == RUU_size) { */
+/* struct RUU_station *rs = &(RUU[RUU_head]); */
+/* if (backend_miss_flag & TLB_MISS) { */
+/* fmt_dtlb_miss_count++; */
+/* sfmt_dtlb_miss_count++; */
+/* } */
+/* else if (backend_miss_flag & L2_CACHE_MISS) { */
+/* fmt_dl1_miss_count++; */
+/* sfmt_dl1_miss_count++; */
+/* } */
+/* else if (backend_miss_flag & L1_CACHE_MISS) { */
+/* fmt_dl2_miss_count++; */
+/* sfmt_dl2_miss_count++; */
+/* } */
+/* else { */
+/* fmt_funct_stall_count++; */
+/* sfmt_funct_stall_count++; */
+/* } */
+/* } */
     if (RUU_num == RUU_size) {
-      if (backend_miss_flag & TLB_MISS) {
+      struct RUU_station *rs = &(RUU[RUU_head]);
+      if (rs->backend_miss_flag & TLB_MISS) {
         fmt_dtlb_miss_count++;
         sfmt_dtlb_miss_count++;
       }
-      else if (backend_miss_flag & L2_CACHE_MISS) {
+      else if (rs->backend_miss_flag & L2_CACHE_MISS) {
         fmt_dl1_miss_count++;
         sfmt_dl1_miss_count++;
       }
-      else if (backend_miss_flag & L1_CACHE_MISS) {
+      else if (rs->backend_miss_flag & L1_CACHE_MISS) {
         fmt_dl2_miss_count++;
         sfmt_dl2_miss_count++;
       }
@@ -5059,12 +5106,18 @@ sim_main(void)
         sfmt_funct_stall_count++;
       }
     }
-    else if (curr_nfmt > 0) { /* if RUU is not full, increment branch counters in RUU */
-      for (int i=(fmt_dispatch_head+1)%nfmt; i!=(fmt_dispatch_tail+1)%nfmt; i=(i+1)%nfmt) {
+    else { /* if RUU is not full, increment branch counters in RUU */
+      int i = (fmt_dispatch_head + 1) % nfmt;
+      for (;;) {
         fmt[i].bpenalty_count++;
+        if (i == fmt_dispatch_tail) break;
+        else i = (i+1)%nfmt;
       }
-      for (int i=(sfmt_dispatch_head+1)%nsfmt; i!=(sfmt_dispatch_tail+1)%nsfmt; i=(i+1)%nsfmt) {
+      i = (sfmt_dispatch_head + 1) % nsfmt;
+      for (;;) {
         sfmt[i].bpenalty_count++;
+        if (i == sfmt_dispatch_tail) break;
+        else i = (i+1)%nsfmt;
       }
     }
 
