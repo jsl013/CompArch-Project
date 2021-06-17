@@ -81,15 +81,68 @@
  */
 
 /* simulated registers */
-static struct regs_t regs;
+/* static struct regs_t *regs; */
 
 /* simulated memory */
-static struct mem_t *mem = NULL;
+/* static struct mem_t *mem = NULL; */
 
+/* an entry in the create vector */
+struct CV_link {
+  struct RUU_station *rs;               /* creator's reservation station */
+  int odep_num;                         /* specific output operand */
+};
+
+/* SMT : simultaneous multi-threading */
+struct thread_t {
+
+  struct RUU_station *RUU;
+  int RUU_head, RUU_tail;
+  int RUU_num;
+
+  struct RUU_station *LSQ;
+  int LSQ_head, LSQ_tail;
+  int LSQ_num;
+  
+  struct fetch_rec *fetch_data;	/* IFETCH -> DISPATCH inst queue */
+  int fetch_num;			/* num entries in IF -> DIS queue */
+  int fetch_tail, fetch_head;	/* head and tail pointers of queue */
+
+  /* fetch unit next fetch address */
+  md_addr_t fetch_regs_PC;
+  md_addr_t fetch_pred_PC;
+
+  /* program counter */
+  md_addr_t pred_PC;
+  md_addr_t recover_PC; /* when is it used? */
+
+  /* simulated registers */
+  struct regs_t regs;
+  struct regs_t spec_regs;
+
+  BITMAP_TYPE(MD_NUM_IREGS, use_spec_R);
+  BITMAP_TYPE(MD_NUM_FREGS, use_spec_F);
+  BITMAP_TYPE(MD_NUM_CREGS, use_spec_C);
+
+  BITMAP_TYPE(MD_TOTAL_REGS, use_spec_cv);
+  struct CV_link create_vector[MD_TOTAL_REGS];
+  struct CV_link spec_create_vector[MD_TOTAL_REGS];
+
+  tick_t create_vector_rt[MD_TOTAL_REGS];
+  tick_t spec_create_vector_rt[MD_TOTAL_REGS];
+
+  /* simulated memory, different address space per thread */
+  struct mem_t *mem;
+
+  unsigned ruu_fetch_issue_delay;
+
+} thread[16];
 
 /*
  * simulator options
  */
+
+/* number of SMT threads */
+static int nthread;
 
 /* maximum number of inst's to execute */
 static unsigned int max_insts;
@@ -735,6 +788,12 @@ sim_reg_options(struct opt_odb_t *odb)
       "latency of all pipeline operations.\n"
       );
 
+  /* SMT : number of threads */
+  opt_reg_int(odb, "-smt:nthread",
+      "total number of SMT threads",
+      &nthread, /* default */16,
+      /* print */TRUE, /* format */NULL);
+
   /* instruction limit */
 
   opt_reg_uint(odb, "-max:inst", "maximum number of inst's to execute",
@@ -912,6 +971,10 @@ sim_reg_options(struct opt_odb_t *odb)
       &cache_dl1_opt, "dl1:128:32:8:l", // baseline: i7
       /* print */TRUE, NULL);
 
+/* opt_reg_string(odb, "-cache:dl1:mshr", */
+/* "data cache MSHR config, i.e., {<config>|none}", */
+/* &cache_mshr_opt, "4:4", */
+/* /1* print *1/TRUE, NULL); */
   opt_reg_string(odb, "-cache:dl1:mshr",
       "data cache MSHR config, i.e., {<config>|none}",
       &cache_mshr_opt, "4:4", 
@@ -1615,7 +1678,9 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
         /* print fn */NULL);
   }
   ld_reg_stats(sdb);
-  mem_reg_stats(mem, sdb);
+  for (i=0; i<nthread; ++i) {
+    mem_reg_stats(thread[i].mem, sdb);
+  }
 }
 
 /* forward declarations */
@@ -1632,14 +1697,17 @@ static void fetch_init(void);
   void
 sim_init(void)
 {
+  int i;
   sim_num_refs = 0;
 
-  /* allocate and initialize register file */
-  regs_init(&regs);
+  for (i=0; i<nthread; ++i) {
+    /* allocate and initialize register file */
+    regs_init(&(thread[i].regs));
 
-  /* allocate and initialize memory space */
-  mem = mem_create("mem");
-  mem_init(mem);
+    /* allocate and initialize memory space */
+    thread[i].mem = mem_create("mem");
+    mem_init(thread[i].mem);
+  }
 }
 
 /* default register state accessor, used by DLite */
@@ -1674,8 +1742,11 @@ sim_load_prog(char *fname,		/* program to load */
     int argc, char **argv,	/* program arguments */
     char **envp)		/* program environment */
 {
+  int i;
   /* load program text and data, set up environment, memory, and regs */
-  ld_load_prog(fname, argc, argv, envp, &regs, mem, TRUE);
+  for (i=0; i<nthread; ++i) {
+    ld_load_prog(fname, argc, argv, envp, &(thread[i].regs), thread[i].mem, TRUE);
+  }
 
   /* initialize here, so symbols can be loaded */
   if (ptrace_nelt == 2)
@@ -1791,6 +1862,7 @@ struct RUU_station {
   int idep_ready[MAX_IDEPS];		/* input operand ready? */
   int backend_miss_flag; /* D-cache/D-TLB miss bit for sFMT */
   int frontend_miss_flag; /* I-cache/I-TLB miss bit for sFMT */
+  int thread_id; /* thread ID for multithreading */
 };
 
 /* non-zero if all register operands are ready, update with MAX_IDEPS */
@@ -1799,22 +1871,25 @@ struct RUU_station {
 
 /* register update unit, combination of reservation stations and reorder
    buffer device, organized as a circular queue */
-static struct RUU_station *RUU;		/* register update unit */
-static int RUU_head, RUU_tail;		/* RUU head and tail pointers */
-static int RUU_num;			/* num entries currently in RUU */
+/* static struct RUU_station *RUU;		/1* register update unit *1/ */
+/* static int RUU_head, RUU_tail;		/1* RUU head and tail pointers *1/ */
+/* static int RUU_num;			/1* num entries currently in RUU *1/ */
 
 /* allocate and initialize register update unit (RUU) */
   static void
 ruu_init(void)
 {
-  RUU = calloc(RUU_size, sizeof(struct RUU_station));
-  if (!RUU)
-    fatal("out of virtual memory");
+  int i;
+  for (i=0; i<nthread; ++i) {
+    thread[i].RUU = calloc(RUU_size, sizeof(struct RUU_station));
+    if (!thread[i].RUU)
+      fatal("out of virtual memory");
 
-  RUU_num = 0;
-  RUU_head = RUU_tail = 0;
-  RUU_count = 0;
-  RUU_fcount = 0;
+    thread[i].RUU_num = 0;
+    thread[i].RUU_head = thread[i].RUU_tail = 0;
+    RUU_count = 0;
+    RUU_fcount = 0;
+  }
 }
 
 /* dump the contents of the RUU */
@@ -1858,23 +1933,25 @@ ruu_dumpent(struct RUU_station *rs,		/* ptr to RUU station */
 ruu_dump(FILE *stream)				/* output stream */
 {
   int num, head;
+  int i;
   struct RUU_station *rs;
 
   if (!stream)
     stream = stderr;
 
-  fprintf(stream, "** RUU state **\n");
-  fprintf(stream, "RUU_head: %d, RUU_tail: %d\n", RUU_head, RUU_tail);
-  fprintf(stream, "RUU_num: %d\n", RUU_num);
-
-  num = RUU_num;
-  head = RUU_head;
-  while (num)
-  {
-    rs = &RUU[head];
-    ruu_dumpent(rs, rs - RUU, stream, /* header */TRUE);
-    head = (head + 1) % RUU_size;
-    num--;
+  for (i=0; i<nthread; ++i) {
+    fprintf(stream, "** RUU state of thread %d**\n", i);
+    fprintf(stream, "RUU_head: %d, RUU_tail: %d\n", thread[i].RUU_head, thread[i].RUU_tail);
+    fprintf(stream, "RUU_num: %d\n", thread[i].RUU_num);
+    num = thread[i].RUU_num;
+    head = thread[i].RUU_head;
+    while (num)
+    {
+      rs = &(thread[i].RUU[head]);
+      ruu_dumpent(rs, rs - thread[i].RUU, stream, /* header */TRUE);
+      head = (head + 1) % RUU_size;
+      num--;
+    }
   }
 }
 
@@ -1906,9 +1983,9 @@ ruu_dump(FILE *stream)				/* output stream */
  *   cycle the store executes (using a bypass network), thus stores complete
  *   in effective zero time after their effective address is known
  */
-static struct RUU_station *LSQ;         /* load/store queue */
-static int LSQ_head, LSQ_tail;          /* LSQ head and tail pointers */
-static int LSQ_num;                     /* num entries currently in LSQ */
+/* static struct RUU_station *LSQ;         /1* load/store queue *1/ */
+/* static int LSQ_head, LSQ_tail;          /1* LSQ head and tail pointers *1/ */
+/* static int LSQ_num;                     /1* num entries currently in LSQ *1/ */
 
 /*
  * input dependencies for stores in the LSQ:
@@ -1925,12 +2002,15 @@ static int LSQ_num;                     /* num entries currently in LSQ */
   static void
 lsq_init(void)
 {
-  LSQ = calloc(LSQ_size, sizeof(struct RUU_station));
-  if (!LSQ)
-    fatal("out of virtual memory");
+  int i;
+  for (i=0; i<nthread; ++i) {
+    thread[i].LSQ = calloc(LSQ_size, sizeof(struct RUU_station));
+    if (!thread[i].LSQ)
+      fatal("out of virtual memory");
 
-  LSQ_num = 0;
-  LSQ_head = LSQ_tail = 0;
+    thread[i].LSQ_num = 0;
+    thread[i].LSQ_head = thread[i].LSQ_tail = 0;
+  }
   LSQ_count = 0;
   LSQ_fcount = 0;
 }
@@ -1940,23 +2020,26 @@ lsq_init(void)
 lsq_dump(FILE *stream)				/* output stream */
 {
   int num, head;
+  int i;
   struct RUU_station *rs;
 
   if (!stream)
     stream = stderr;
 
-  fprintf(stream, "** LSQ state **\n");
-  fprintf(stream, "LSQ_head: %d, LSQ_tail: %d\n", LSQ_head, LSQ_tail);
-  fprintf(stream, "LSQ_num: %d\n", LSQ_num);
+  for (i=0; i<nthread; ++i) {
+    fprintf(stream, "** LSQ state of thread %d **\n", i);
+    fprintf(stream, "LSQ_head: %d, LSQ_tail: %d\n", thread[i].LSQ_head, thread[i].LSQ_tail);
+    fprintf(stream, "LSQ_num: %d\n", thread[i].LSQ_num);
 
-  num = LSQ_num;
-  head = LSQ_head;
-  while (num)
-  {
-    rs = &LSQ[head];
-    ruu_dumpent(rs, rs - LSQ, stream, /* header */TRUE);
-    head = (head + 1) % LSQ_size;
-    num--;
+    num = thread[i].LSQ_num;
+    head = thread[i].LSQ_head;
+    while (num)
+    {
+      rs = &(thread[i].LSQ[head]);
+      ruu_dumpent(rs, rs - thread[i].LSQ, stream, /* header */TRUE);
+      head = (head + 1) % LSQ_size;
+      num--;
+    }
   }
 }
 
@@ -2109,8 +2192,8 @@ eventq_dump(FILE *stream)			/* output stream */
       struct RUU_station *rs = RSLINK_RS(ev);
 
       fprintf(stream, "idx: %2d: @ %.0f\n",
-          (int)(rs - (rs->in_LSQ ? LSQ : RUU)), (double)ev->x.when);
-      ruu_dumpent(rs, rs - (rs->in_LSQ ? LSQ : RUU),
+          (int)(rs - (rs->in_LSQ ? thread[rs->thread_id].LSQ : thread[rs->thread_id].RUU)), (double)ev->x.when);
+      ruu_dumpent(rs, rs - (rs->in_LSQ ? thread[rs->thread_id].LSQ : thread[rs->thread_id].RUU),
           stream, /* !header */FALSE);
     }
   }
@@ -2234,7 +2317,7 @@ readyq_dump(FILE *stream)			/* output stream */
     {
       struct RUU_station *rs = RSLINK_RS(link);
 
-      ruu_dumpent(rs, rs - (rs->in_LSQ ? LSQ : RUU),
+      ruu_dumpent(rs, rs - (rs->in_LSQ ? thread[rs->thread_id].LSQ : thread[rs->thread_id].RUU),
           stream, /* header */TRUE);
     }
   }
@@ -2302,11 +2385,6 @@ readyq_enqueue(struct RUU_station *rs)		/* RS to enqueue */
  * is NULL)
  */
 
-/* an entry in the create vector */
-struct CV_link {
-  struct RUU_station *rs;               /* creator's reservation station */
-  int odep_num;                         /* specific output operand */
-};
 
 /* a NULL create vector entry */
 static struct CV_link CVLINK_NULL = { NULL, 0 };
@@ -2320,14 +2398,14 @@ static struct CV_link CVLINK_NULL = { NULL, 0 };
 /* the create vector, NOTE: speculative copy on write storage provided
    for fast recovery during wrong path execute (see tracer_recover() for
    details on this process */
-static BITMAP_TYPE(MD_TOTAL_REGS, use_spec_cv);
-static struct CV_link create_vector[MD_TOTAL_REGS];
-static struct CV_link spec_create_vector[MD_TOTAL_REGS];
+/* static BITMAP_TYPE(MD_TOTAL_REGS, use_spec_cv); */
+/* static struct CV_link create_vector[MD_TOTAL_REGS]; */
+/* static struct CV_link spec_create_vector[MD_TOTAL_REGS]; */
 
 /* these arrays shadow the create vector an indicate when a register was
    last created */
-static tick_t create_vector_rt[MD_TOTAL_REGS];
-static tick_t spec_create_vector_rt[MD_TOTAL_REGS];
+/* static tick_t create_vector_rt[MD_TOTAL_REGS]; */
+/* static tick_t spec_create_vector_rt[MD_TOTAL_REGS]; */
 
 /* read a create vector entry */
 #define CREATE_VECTOR(N)        (BITMAP_SET_P(use_spec_cv, CV_BMAP_SZ, (N))\
@@ -2350,19 +2428,24 @@ static tick_t spec_create_vector_rt[MD_TOTAL_REGS];
 cv_init(void)
 {
   int i;
+  int th;
 
   /* initially all registers are valid in the architected register file,
      i.e., the create vector entry is CVLINK_NULL */
-  for (i=0; i < MD_TOTAL_REGS; i++)
-  {
-    create_vector[i] = CVLINK_NULL;
-    create_vector_rt[i] = 0;
-    spec_create_vector[i] = CVLINK_NULL;
-    spec_create_vector_rt[i] = 0;
-  }
+  
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    for (i=0; i < MD_TOTAL_REGS; i++)
+    {
+      curr_th->create_vector[i] = CVLINK_NULL;
+      curr_th->create_vector_rt[i] = 0;
+      curr_th->spec_create_vector[i] = CVLINK_NULL;
+      curr_th->spec_create_vector_rt[i] = 0;
+    }
 
-  /* all create vector entries are non-speculative */
-  BITMAP_CLEAR_MAP(use_spec_cv, CV_BMAP_SZ);
+    /* all create vector entries are non-speculative */
+    BITMAP_CLEAR_MAP(curr_th->use_spec_cv, CV_BMAP_SZ);
+  }
 }
 
 /* dump the contents of the create vector */
@@ -2385,7 +2468,7 @@ cv_dump(FILE *stream)				/* output stream */
     else
       fprintf(stream, "[cv%02d]: from %s, idx: %d\n",
           i, (ent.rs->in_LSQ ? "LSQ" : "RUU"),
-          (int)(ent.rs - (ent.rs->in_LSQ ? LSQ : RUU)));
+          (int)(ent.rs - (ent.rs->in_LSQ ? thread[ent.rs->thread_id].LSQ : thread[ent.rs->thread_id].RUU)));
   }
 }
 
@@ -2400,215 +2483,221 @@ cv_dump(FILE *stream)				/* output stream */
   static void
 ruu_commit(void)
 {
-  int i, lat, events, committed = 0;
-  static counter_t sim_ret_insn = 0;
+  int i, lat, events, committed;
+  static counter_t sim_ret_insn;
   counter_t dl1_misses;
   counter_t dl2_misses;
+  int th;
 
   /* all values must be retired to the architected reg file in program order */
-  while (RUU_num > 0 && committed < ruu_commit_width)
-  {
-    struct RUU_station *rs = &(RUU[RUU_head]);
-
-    if (!rs->completed)
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    committed = 0;
+    sim_ret_insn = 0;
+    while (curr_th->RUU_num > 0 && committed < ruu_commit_width)
     {
-      /* at least RUU entry must be complete */
-      break;
-    }
+      struct RUU_station *rs = &(curr_th->RUU[curr_th->RUU_head]);
 
-    /* default commit events */
-    events = 0;
-
-    /* load/stores must retire load/store queue entry as well */
-    if (RUU[RUU_head].ea_comp)
-    {
-      /* load/store, retire head of LSQ as well */
-      if (LSQ_num <= 0 || !LSQ[LSQ_head].in_LSQ)
-        panic("RUU out of sync with LSQ");
-
-      /* load/store operation must be complete */
-      if (!LSQ[LSQ_head].completed)
+      if (!rs->completed)
       {
-        /* load/store operation is not yet complete */
+        /* at least RUU entry must be complete */
         break;
       }
 
-      if ((MD_OP_FLAGS(LSQ[LSQ_head].op) & (F_MEM|F_STORE))
-          == (F_MEM|F_STORE))
+      /* default commit events */
+      events = 0;
+
+      /* load/stores must retire load/store queue entry as well */
+      if (curr_th->RUU[curr_th->RUU_head].ea_comp)
       {
-        struct res_template *fu;
+        /* load/store, retire head of LSQ as well */
+        if (curr_th->LSQ_num <= 0 || !curr_th->LSQ[curr_th->LSQ_head].in_LSQ)
+          panic("RUU out of sync with LSQ");
 
-
-        /* stores must retire their store value to the cache at commit,
-           try to get a store port (functional unit allocation) */
-        fu = res_get(fu_pool, MD_OP_FUCLASS(LSQ[LSQ_head].op));
-        if (fu)
+        /* load/store operation must be complete */
+        if (!curr_th->LSQ[curr_th->LSQ_head].completed)
         {
-          /* reserve the functional unit */
-          if (fu->master->busy)
-            panic("functional unit already in use");
-
-          /* schedule functional unit release event */
-          fu->master->busy = fu->issuelat;
-
-          /* go to the data cache */
-          if (cache_dl1)
-          {
-            dl1_misses = cache_dl1->misses;
-            dl2_misses = cache_dl2->misses;
-            /* commit store value to D-cache */
-            lat =
-              cache_access(cache_dl1, Write, (LSQ[LSQ_head].addr&~3),
-                  NULL, 4, sim_cycle, NULL, NULL);
-            if (lat > cache_dl1_lat)
-              events |= PEV_CACHEMISS;
-            if (lat == CACHE_BLKED) {
-              fu->master->busy = 0;
-              break;
-            }
-            if (dl1_misses < cache_dl1->misses) {
-              if (dl2_misses < cache_dl2->misses){
-                backend_miss_flag |= L2_CACHE_MISS;
-                rs->backend_miss_flag = L2_CACHE_MISS;
-                naive_dl2_miss_count++;
-              }
-              else {
-                backend_miss_flag |= L1_CACHE_MISS;
-                rs->backend_miss_flag = L1_CACHE_MISS;
-                naive_dl1_miss_count++;
-              }
-            }
-          }
-
-          /* all loads and stores must to access D-TLB */
-          if (dtlb)
-          {
-            /* access the D-TLB */
-            lat =
-              cache_access(dtlb, Read, (LSQ[LSQ_head].addr & ~3),
-                  NULL, 4, sim_cycle, NULL, NULL);
-            if (lat > 1) {
-              events |= PEV_TLBMISS;
-              backend_miss_flag |= TLB_MISS;
-              rs->backend_miss_flag = TLB_MISS;
-              naive_dtlb_miss_count++;
-            }
-          }
-        }
-        else
-        {
-          /* no store ports left, cannot continue to commit insts */
+          /* load/store operation is not yet complete */
           break;
         }
+
+        if ((MD_OP_FLAGS(curr_th->LSQ[curr_th->LSQ_head].op) & (F_MEM|F_STORE))
+            == (F_MEM|F_STORE))
+        {
+          struct res_template *fu;
+
+
+          /* stores must retire their store value to the cache at commit,
+             try to get a store port (functional unit allocation) */
+          fu = res_get(fu_pool, MD_OP_FUCLASS(curr_th->LSQ[curr_th->LSQ_head].op));
+          if (fu)
+          {
+            /* reserve the functional unit */
+            if (fu->master->busy)
+              panic("functional unit already in use");
+
+            /* schedule functional unit release event */
+            fu->master->busy = fu->issuelat;
+
+            /* go to the data cache */
+            if (cache_dl1)
+            {
+              dl1_misses = cache_dl1->misses;
+              dl2_misses = cache_dl2->misses;
+              /* commit store value to D-cache */
+              lat =
+                cache_access(cache_dl1, Write, (curr_th->LSQ[curr_th->LSQ_head].addr&~3),
+                    NULL, 4, sim_cycle, NULL, NULL);
+              if (lat > cache_dl1_lat)
+                events |= PEV_CACHEMISS;
+              if (lat == CACHE_BLKED) {
+                fu->master->busy = 0;
+                break;
+              }
+              if (dl1_misses < cache_dl1->misses) {
+                if (dl2_misses < cache_dl2->misses){
+                  backend_miss_flag |= L2_CACHE_MISS;
+                  rs->backend_miss_flag = L2_CACHE_MISS;
+                  naive_dl2_miss_count++;
+                }
+                else {
+                  backend_miss_flag |= L1_CACHE_MISS;
+                  rs->backend_miss_flag = L1_CACHE_MISS;
+                  naive_dl1_miss_count++;
+                }
+              }
+            }
+
+            /* all loads and stores must to access D-TLB */
+            if (dtlb)
+            {
+              /* access the D-TLB */
+              lat =
+                cache_access(dtlb, Read, (curr_th->LSQ[curr_th->LSQ_head].addr & ~3),
+                    NULL, 4, sim_cycle, NULL, NULL);
+              if (lat > 1) {
+                events |= PEV_TLBMISS;
+                backend_miss_flag |= TLB_MISS;
+                rs->backend_miss_flag = TLB_MISS;
+                naive_dtlb_miss_count++;
+              }
+            }
+          }
+          else
+          {
+            /* no store ports left, cannot continue to commit insts */
+            break;
+          }
+        }
+
+        /* invalidate load/store operation instance */
+        curr_th->LSQ[curr_th->LSQ_head].tag++;
+        sim_slip += (sim_cycle - curr_th->LSQ[curr_th->LSQ_head].slip);
+
+        /* indicate to pipeline trace that this instruction retired */
+        ptrace_newstage(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq, PST_COMMIT, events);
+        ptrace_endinst(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq);
+
+        /* commit head of LSQ as well */
+        curr_th->LSQ_head = (curr_th->LSQ_head + 1) % LSQ_size;
+        curr_th->LSQ_num--;
       }
 
-      /* invalidate load/store operation instance */
-      LSQ[LSQ_head].tag++;
-      sim_slip += (sim_cycle - LSQ[LSQ_head].slip);
+      if (pred
+          && bpred_spec_update == spec_CT
+          && (MD_OP_FLAGS(rs->op) & F_CTRL))
+      {
+        bpred_update(pred,
+            /* branch address */rs->PC,
+            /* actual target address */rs->next_PC,
+            /* taken? */rs->next_PC != (rs->PC +
+              sizeof(md_inst_t)),
+            /* pred taken? */rs->pred_PC != (rs->PC +
+              sizeof(md_inst_t)),
+            /* correct pred? */rs->pred_PC == rs->next_PC,
+            /* opcode */rs->op,
+            /* dir predictor update pointer */&rs->dir_update);
+      }
+
+      if (MD_OP_FLAGS(rs->op) & F_CTRL)
+      {
+        int fmt_index = (fmt_dispatch_head + 1) % nfmt; /* it should be fmt_dispatch_head + 1*/
+        int sfmt_index = (sfmt_dispatch_head + 1) % nsfmt; /* it should be sfmt_dispatch_head + 1*/
+        if (fmt_index == -1 || sfmt_index == -1)
+          panic("There is no allocated branch inst in FMT/sFMT"); 
+        else {
+          if (fmt[fmt_index].mispred) { /* branch misprediction */
+            if (sim_num_insn > warmup_count)
+              fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
+            /* global branch misprediction penalty counter should be incremented until new inst enter RUU */
+            fmt_should_plus = 1;
+          }
+          else if (sim_num_insn > warmup_count) {
+            fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
+            fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
+            fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
+          }
+          if (sfmt[sfmt_index].mispred) {
+            if (sim_num_insn > warmup_count)
+              sfmt_bpenalty_count += sfmt[sfmt_index].bpenalty_count;
+            sfmt_local_itlb_count = 0;
+            sfmt_local_il1_count = 0;
+            sfmt_local_il2_count = 0;
+            sfmt_should_plus = 1;
+          }
+          sfmt_dispatch_head = (sfmt_dispatch_head + 1) % nsfmt;
+          curr_nsfmt--;
+
+          fmt_dispatch_head = (fmt_dispatch_head + 1) % nfmt;
+          curr_nfmt--;
+        }
+      }
+
+      if (rs->frontend_miss_flag) {
+        if (sim_num_insn > warmup_count) {
+          sfmt_itlb_miss_count += sfmt_local_itlb_count;
+          sfmt_il1_miss_count += sfmt_local_il1_count;
+          sfmt_il2_miss_count += sfmt_local_il2_count;
+        }
+        sfmt_local_itlb_count = 0;
+        sfmt_local_il1_count = 0;
+        sfmt_local_il2_count = 0;
+        for (int i=0; i<curr_th->RUU_num; ++i) {
+          curr_th->RUU[(curr_th->RUU_head+i)%RUU_size].frontend_miss_flag = 0;
+        }
+      }
+
+      /* invalidate RUU operation instance */
+      curr_th->RUU[curr_th->RUU_head].tag++;
+      sim_slip += (sim_cycle - curr_th->RUU[curr_th->RUU_head].slip);
+      /* print retirement trace if in verbose mode */
+      if (verbose)
+      {
+        sim_ret_insn++;
+        myfprintf(stderr, "%10n @ 0x%08p: ", sim_ret_insn, curr_th->RUU[curr_th->RUU_head].PC);
+        md_print_insn(curr_th->RUU[curr_th->RUU_head].IR, curr_th->RUU[curr_th->RUU_head].PC, stderr);
+        if (MD_OP_FLAGS(curr_th->RUU[curr_th->RUU_head].op) & F_MEM)
+          myfprintf(stderr, "  mem: 0x%08p", curr_th->RUU[curr_th->RUU_head].addr);
+        fprintf(stderr, "\n");
+        /* fflush(stderr); */
+      }
 
       /* indicate to pipeline trace that this instruction retired */
-      ptrace_newstage(LSQ[LSQ_head].ptrace_seq, PST_COMMIT, events);
-      ptrace_endinst(LSQ[LSQ_head].ptrace_seq);
+      ptrace_newstage(curr_th->RUU[curr_th->RUU_head].ptrace_seq, PST_COMMIT, events);
+      ptrace_endinst(curr_th->RUU[curr_th->RUU_head].ptrace_seq);
 
-      /* commit head of LSQ as well */
-      LSQ_head = (LSQ_head + 1) % LSQ_size;
-      LSQ_num--;
-    }
+      /* commit head entry of RUU */
+      curr_th->RUU_head = (curr_th->RUU_head + 1) % RUU_size;
+      curr_th->RUU_num--;
 
-    if (pred
-        && bpred_spec_update == spec_CT
-        && (MD_OP_FLAGS(rs->op) & F_CTRL))
-    {
-      bpred_update(pred,
-          /* branch address */rs->PC,
-          /* actual target address */rs->next_PC,
-          /* taken? */rs->next_PC != (rs->PC +
-            sizeof(md_inst_t)),
-          /* pred taken? */rs->pred_PC != (rs->PC +
-            sizeof(md_inst_t)),
-          /* correct pred? */rs->pred_PC == rs->next_PC,
-          /* opcode */rs->op,
-          /* dir predictor update pointer */&rs->dir_update);
-    }
+      /* one more instruction committed to architected state */
+      committed++;
 
-    if (MD_OP_FLAGS(rs->op) & F_CTRL)
-    {
-      int fmt_index = (fmt_dispatch_head + 1) % nfmt; /* it should be fmt_dispatch_head + 1*/
-      int sfmt_index = (sfmt_dispatch_head + 1) % nsfmt; /* it should be sfmt_dispatch_head + 1*/
-      if (fmt_index == -1 || sfmt_index == -1)
-        panic("There is no allocated branch inst in FMT/sFMT"); 
-      else {
-        if (fmt[fmt_index].mispred) { /* branch misprediction */
-          if (sim_num_insn > warmup_count)
-            fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
-          /* global branch misprediction penalty counter should be incremented until new inst enter RUU */
-          fmt_should_plus = 1;
-        }
-        if (sfmt[sfmt_index].mispred) {
-          if (sim_num_insn > warmup_count)
-            sfmt_bpenalty_count += sfmt[sfmt_index].bpenalty_count;
-          sfmt_local_itlb_count = 0;
-          sfmt_local_il1_count = 0;
-          sfmt_local_il2_count = 0;
-          sfmt_should_plus = 1;
-        }
-        sfmt_dispatch_head = (sfmt_dispatch_head + 1) % nsfmt;
-        curr_nsfmt--;
-
-        if (sim_num_insn > warmup_count) {
-          fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
-          fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
-          fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
-        }
-        fmt_dispatch_head = (fmt_dispatch_head + 1) % nfmt;
-        curr_nfmt--;
+      for (i=0; i<MAX_ODEPS; i++)
+      {
+        if (rs->odep_list[i])
+          panic ("retired instruction has odeps\n");
       }
-    }
-
-    if (rs->frontend_miss_flag) {
-      if (sim_num_insn > warmup_count) {
-        sfmt_itlb_miss_count += sfmt_local_itlb_count;
-        sfmt_il1_miss_count += sfmt_local_il1_count;
-        sfmt_il2_miss_count += sfmt_local_il2_count;
-      }
-      sfmt_local_itlb_count = 0;
-      sfmt_local_il1_count = 0;
-      sfmt_local_il2_count = 0;
-      for (int i=0; i<RUU_num; ++i) {
-        RUU[(RUU_head+i)%RUU_size].frontend_miss_flag = 0;
-      }
-    }
-
-    /* invalidate RUU operation instance */
-    RUU[RUU_head].tag++;
-    sim_slip += (sim_cycle - RUU[RUU_head].slip);
-    /* print retirement trace if in verbose mode */
-    if (verbose)
-    {
-      sim_ret_insn++;
-      myfprintf(stderr, "%10n @ 0x%08p: ", sim_ret_insn, RUU[RUU_head].PC);
-      md_print_insn(RUU[RUU_head].IR, RUU[RUU_head].PC, stderr);
-      if (MD_OP_FLAGS(RUU[RUU_head].op) & F_MEM)
-        myfprintf(stderr, "  mem: 0x%08p", RUU[RUU_head].addr);
-      fprintf(stderr, "\n");
-      /* fflush(stderr); */
-    }
-
-    /* indicate to pipeline trace that this instruction retired */
-    ptrace_newstage(RUU[RUU_head].ptrace_seq, PST_COMMIT, events);
-    ptrace_endinst(RUU[RUU_head].ptrace_seq);
-
-    /* commit head entry of RUU */
-    RUU_head = (RUU_head + 1) % RUU_size;
-    RUU_num--;
-
-    /* one more instruction committed to architected state */
-    committed++;
-
-    for (i=0; i<MAX_ODEPS; i++)
-    {
-      if (rs->odep_list[i])
-        panic ("retired instruction has odeps\n");
     }
   }
 }
@@ -2621,10 +2710,11 @@ ruu_commit(void)
 /* recover processor microarchitecture state back to point of the
    mis-predicted branch at RUU[BRANCH_INDEX] */
   static void
-ruu_recover(int branch_index)			/* index of mis-pred branch */
+ruu_recover(int thread_id, int branch_index)			/* index of mis-pred branch */
 {
-  int i, RUU_index = RUU_tail, LSQ_index = LSQ_tail;
-  int RUU_prev_tail = RUU_tail, LSQ_prev_tail = LSQ_tail;
+  struct thread_t *curr_th = &(thread[thread_id]);
+  int i, RUU_index = curr_th->RUU_tail, LSQ_index = curr_th->LSQ_tail;
+  int RUU_prev_tail = curr_th->RUU_tail, LSQ_prev_tail = curr_th->LSQ_tail;
   int fmt_index, sfmt_index;
   /* recover from the tail of the RUU towards the head until the branch index
      is reached, this direction ensures that the LSQ can be synchronized with
@@ -2676,68 +2766,68 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
   while (RUU_index != branch_index)
   {
     /* the RUU should not drain since the mispredicted branch will remain */
-    if (!RUU_num)
+    if (!curr_th->RUU_num)
       panic("empty RUU");
 
     /* should meet up with the tail first */
-    if (RUU_index == RUU_head)
+    if (RUU_index == curr_th->RUU_head)
       panic("RUU head and tail broken");
 
     /* is this operation an effective addr calc for a load or store? */
-    if (RUU[RUU_index].ea_comp)
+    if (curr_th->RUU[RUU_index].ea_comp)
     {
       /* should be at least one load or store in the LSQ */
-      if (!LSQ_num)
+      if (!curr_th->LSQ_num)
         panic("RUU and LSQ out of sync");
 
       /* recover any resources consumed by the load or store operation */
       for (i=0; i<MAX_ODEPS; i++)
       {
-        RSLINK_FREE_LIST(LSQ[LSQ_index].odep_list[i]);
+        RSLINK_FREE_LIST(curr_th->LSQ[LSQ_index].odep_list[i]);
         /* blow away the consuming op list */
-        LSQ[LSQ_index].odep_list[i] = NULL;
+        curr_th->LSQ[LSQ_index].odep_list[i] = NULL;
       }
 
       /* squash this LSQ entry */
-      LSQ[LSQ_index].tag++;
+      curr_th->LSQ[LSQ_index].tag++;
 
       /* indicate in pipetrace that this instruction was squashed */
-      ptrace_endinst(LSQ[LSQ_index].ptrace_seq);
+      ptrace_endinst(curr_th->LSQ[LSQ_index].ptrace_seq);
 
       /* go to next earlier LSQ slot */
       LSQ_prev_tail = LSQ_index;
       LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
-      LSQ_num--;
+      curr_th->LSQ_num--;
     }
 
     /* recover any resources used by this RUU operation */
     for (i=0; i<MAX_ODEPS; i++)
     {
-      RSLINK_FREE_LIST(RUU[RUU_index].odep_list[i]);
+      RSLINK_FREE_LIST(curr_th->RUU[RUU_index].odep_list[i]);
       /* blow away the consuming op list */
-      RUU[RUU_index].odep_list[i] = NULL;
+      curr_th->RUU[RUU_index].odep_list[i] = NULL;
     }
 
     /* squash this RUU entry */
-    RUU[RUU_index].tag++;
+    curr_th->RUU[RUU_index].tag++;
 
     /* indicate in pipetrace that this instruction was squashed */
-    ptrace_endinst(RUU[RUU_index].ptrace_seq);
+    ptrace_endinst(curr_th->RUU[RUU_index].ptrace_seq);
 
     /* go to next earlier slot in the RUU */
     RUU_prev_tail = RUU_index;
     RUU_index = (RUU_index + (RUU_size-1)) % RUU_size;
-    RUU_num--;
+    curr_th->RUU_num--;
   }
 
   /* reset head/tail pointers to point to the mis-predicted branch */
-  RUU_tail = RUU_prev_tail;
-  LSQ_tail = LSQ_prev_tail;
+  curr_th->RUU_tail = RUU_prev_tail;
+  curr_th->LSQ_tail = LSQ_prev_tail;
 
   /* revert create vector back to last precise create vector state, NOTE:
      this is accomplished by resetting all the copied-on-write bits in the
      USE_SPEC_CV bit vector */
-  BITMAP_CLEAR_MAP(use_spec_cv, CV_BMAP_SZ);
+  BITMAP_CLEAR_MAP(curr_th->use_spec_cv, CV_BMAP_SZ);
 
   /* FIXME: could reset functional units at squash time */
 }
@@ -2748,7 +2838,7 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
  */
 
 /* forward declarations */
-static void tracer_recover(void);
+static void tracer_recover(int thread_id);
 
 /* writeback completed operation results from the functional units to RUU,
    at this point, the output dependency chains of completing instructions
@@ -2760,6 +2850,7 @@ ruu_writeback(void)
 {
   int i;
   struct RUU_station *rs;
+  struct thread_t *curr_th = &(thread[rs->thread_id]);
 
   /* service all completed events */
   while ((rs = eventq_next_event()))
@@ -2778,7 +2869,7 @@ ruu_writeback(void)
         panic("mis-predicted load or store?!?!?");
 
       /* recover processor state and reinit fetch to correct path */
-      ruu_recover(rs - RUU);
+      ruu_recover(rs->thread_id, rs - curr_th->RUU);
       tracer_recover();
       bpred_recover(pred, rs->PC, rs->stack_recover_idx);
       recovery_count++;
@@ -2826,14 +2917,14 @@ ruu_writeback(void)
         {
           /* update the speculative create vector, future operations
              get value from later creator or architected reg file */
-          link = spec_create_vector[rs->onames[i]];
+          link = curr_th->spec_create_vector[rs->onames[i]];
           if (/* !NULL */link.rs
               && /* refs RS */(link.rs == rs && link.odep_num == i))
           {
             /* the result can now be read from a physical register,
                indicate this as so */
-            spec_create_vector[rs->onames[i]] = CVLINK_NULL;
-            spec_create_vector_rt[rs->onames[i]] = sim_cycle;
+            curr_th->spec_create_vector[rs->onames[i]] = CVLINK_NULL;
+            curr_th->spec_create_vector_rt[rs->onames[i]] = sim_cycle;
           }
           /* else, creator invalidated or there is another creator */
         }
@@ -2842,14 +2933,14 @@ ruu_writeback(void)
           /* update the non-speculative create vector, future
              operations get value from later creator or architected
              reg file */
-          link = create_vector[rs->onames[i]];
+          link = curr_th->create_vector[rs->onames[i]];
           if (/* !NULL */link.rs
               && /* refs RS */(link.rs == rs && link.odep_num == i))
           {
             /* the result can now be read from a physical register,
                indicate this as so */
-            create_vector[rs->onames[i]] = CVLINK_NULL;
-            create_vector_rt[rs->onames[i]] = sim_cycle;
+            curr_th->create_vector[rs->onames[i]] = CVLINK_NULL;
+            curr_th->create_vector_rt[rs->onames[i]] = sim_cycle;
           }
           /* else, creator invalidated or there is another creator */
         }
@@ -2911,67 +3002,71 @@ lsq_refresh(void)
 {
   int i, j, index, n_std_unknowns;
   md_addr_t std_unknowns[MAX_STD_UNKNOWNS];
+  int th;
 
   /* scan entire queue for ready loads: scan from oldest instruction
      (head) until we reach the tail or an unresolved store, after which no
      other instruction will become ready */
-  for (i=0, index=LSQ_head, n_std_unknowns=0;
-      i < LSQ_num;
-      i++, index=(index + 1) % LSQ_size)
-  {
-    /* terminate search for ready loads after first unresolved store,
-       as no later load could be resolved in its presence */
-    if (/* store? */
-        (MD_OP_FLAGS(LSQ[index].op) & (F_MEM|F_STORE)) == (F_MEM|F_STORE))
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    for (i=0, index=curr_th->LSQ_head, n_std_unknowns=0;
+        i < curr_th->LSQ_num;
+        i++, index=(index + 1) % LSQ_size)
     {
-      if (!STORE_ADDR_READY(&LSQ[index]) && !perfect_disambig)
+      /* terminate search for ready loads after first unresolved store,
+         as no later load could be resolved in its presence */
+      if (/* store? */
+          (MD_OP_FLAGS(curr_th->LSQ[index].op) & (F_MEM|F_STORE)) == (F_MEM|F_STORE))
       {
-        /* FIXME: a later STD + STD known could hide the STA unknown */
-        /* STA unknown, blocks all later loads, stop search */
-        break;
-      }
-      else if (!OPERANDS_READY(&LSQ[index]) ||
-          (!STORE_ADDR_READY(&LSQ[index]) && perfect_disambig))
-      {
-        /* STA known, but STD unknown: may block a later store, record
-           this address for later referral, we use an array here because
-           for most simulations the number of entries to search will be
-           very small.  If perfect disambiguation is on and the address is
-           not ready, treat this in the same manner as a STD unknown. */
-        if (n_std_unknowns == MAX_STD_UNKNOWNS)
-          fatal("STD unknown array overflow, increase MAX_STD_UNKNOWNS");
-        std_unknowns[n_std_unknowns++] = LSQ[index].addr;
-      }
-      else /* STORE_ADDR_READY() && OPERANDS_READY() */
-      {
-        /* a later STD known hides an earlier STD unknown */
-        for (j=0; j<n_std_unknowns; j++)
+        if (!STORE_ADDR_READY(&curr_th->LSQ[index]) && !perfect_disambig)
         {
-          if (std_unknowns[j] == /* STA/STD known */LSQ[index].addr)
-            std_unknowns[j] = /* bogus addr */0;
+          /* FIXME: a later STD + STD known could hide the STA unknown */
+          /* STA unknown, blocks all later loads, stop search */
+          break;
+        }
+        else if (!OPERANDS_READY(&curr_th->LSQ[index]) ||
+            (!STORE_ADDR_READY(&curr_th->LSQ[index]) && perfect_disambig))
+        {
+          /* STA known, but STD unknown: may block a later store, record
+             this address for later referral, we use an array here because
+             for most simulations the number of entries to search will be
+             very small.  If perfect disambiguation is on and the address is
+             not ready, treat this in the same manner as a STD unknown. */
+          if (n_std_unknowns == MAX_STD_UNKNOWNS)
+            fatal("STD unknown array overflow, increase MAX_STD_UNKNOWNS");
+          std_unknowns[n_std_unknowns++] = curr_th->LSQ[index].addr;
+        }
+        else /* STORE_ADDR_READY() && OPERANDS_READY() */
+        {
+          /* a later STD known hides an earlier STD unknown */
+          for (j=0; j<n_std_unknowns; j++)
+          {
+            if (std_unknowns[j] == /* STA/STD known */curr_th->LSQ[index].addr)
+              std_unknowns[j] = /* bogus addr */0;
+          }
         }
       }
-    }
 
-    if (/* load? */
-        ((MD_OP_FLAGS(LSQ[index].op) & (F_MEM|F_LOAD)) == (F_MEM|F_LOAD))
-        && /* queued? */!LSQ[index].queued
-        && /* waiting? */!LSQ[index].issued
-        && /* completed? */!LSQ[index].completed
-        && /* regs ready? */OPERANDS_READY(&LSQ[index]))
-    {
-      /* no STA unknown conflict (because we got to this check), check for
-         a STD unknown conflict */
-      for (j=0; j<n_std_unknowns; j++)
+      if (/* load? */
+          ((MD_OP_FLAGS(curr_th->LSQ[index].op) & (F_MEM|F_LOAD)) == (F_MEM|F_LOAD))
+          && /* queued? */!curr_th->LSQ[index].queued
+          && /* waiting? */!curr_th->LSQ[index].issued
+          && /* completed? */!curr_th->LSQ[index].completed
+          && /* regs ready? */OPERANDS_READY(&curr_th->LSQ[index]))
       {
-        /* found a relevant STD unknown? */
-        if (std_unknowns[j] == LSQ[index].addr)
-          break;
-      }
-      if (j == n_std_unknowns)
-      {
-        /* no STA or STD unknown conflicts, put load on ready queue */
-        readyq_enqueue(&LSQ[index]);
+        /* no STA unknown conflict (because we got to this check), check for
+           a STD unknown conflict */
+        for (j=0; j<n_std_unknowns; j++)
+        {
+          /* found a relevant STD unknown? */
+          if (std_unknowns[j] == curr_th->LSQ[index].addr)
+            break;
+        }
+        if (j == n_std_unknowns)
+        {
+          /* no STA or STD unknown conflicts, put load on ready queue */
+          readyq_enqueue(&curr_th->LSQ[index]);
+        }
       }
     }
   }
@@ -3019,6 +3114,7 @@ ruu_issue(void)
     if (RSLINK_VALID(node))
     {
       struct RUU_station *rs = RSLINK_RS(node);
+      struct thread_t *curr_th = &(thread[rs->thread_id]);
 
       /* issue operation, both reg and mem deps have been satisfied */
       if (!OPERANDS_READY(rs) || !rs->queued
@@ -3077,8 +3173,8 @@ ruu_issue(void)
                  first scan LSQ to see if a store forward is
                  possible, if not, access the data cache */
               load_lat = 0;
-              i = (rs - LSQ);
-              if (i != LSQ_head)
+              i = (rs - curr_th->LSQ);
+              if (i != curr_th->LSQ_head)
               {
                 for (;;)
                 {
@@ -3086,8 +3182,8 @@ ruu_issue(void)
                   i = (i + (LSQ_size-1)) % LSQ_size;
 
                   /* FIXME: not dealing with partials! */
-                  if ((MD_OP_FLAGS(LSQ[i].op) & F_STORE)
-                      && (LSQ[i].addr == rs->addr))
+                  if ((MD_OP_FLAGS(curr_th->LSQ[i].op) & F_STORE)
+                      && (curr_th->LSQ[i].addr == rs->addr))
                   {
                     /* hit in the LSQ */
                     load_lat = 1;
@@ -3095,7 +3191,7 @@ ruu_issue(void)
                   }
 
                   /* scan finished? */
-                  if (i == LSQ_head)
+                  if (i == curr_th->LSQ_head)
                     break;
                 }
               }
@@ -3244,24 +3340,25 @@ ruu_issue(void)
 
 /* integer register file */
 #define R_BMAP_SZ       (BITMAP_SIZE(MD_NUM_IREGS))
-static BITMAP_TYPE(MD_NUM_IREGS, use_spec_R);
-static md_gpr_t spec_regs_R;
+/* static BITMAP_TYPE(MD_NUM_IREGS, use_spec_R); */
+/* static md_gpr_t spec_regs_R; */
 
 /* floating point register file */
 #define F_BMAP_SZ       (BITMAP_SIZE(MD_NUM_FREGS))
-static BITMAP_TYPE(MD_NUM_FREGS, use_spec_F);
-static md_fpr_t spec_regs_F;
+/* static BITMAP_TYPE(MD_NUM_FREGS, use_spec_F); */
+/* static md_fpr_t spec_regs_F; */
 
 /* miscellaneous registers */
 #define C_BMAP_SZ       (BITMAP_SIZE(MD_NUM_CREGS))
-static BITMAP_TYPE(MD_NUM_FREGS, use_spec_C);
-static md_ctrl_t spec_regs_C;
+/* static BITMAP_TYPE(MD_NUM_FREGS, use_spec_C); */
+/* static md_ctrl_t spec_regs_C; */
 
 /* dump speculative register state */
   static void
 rspec_dump(FILE *stream)			/* output stream */
 {
   int i;
+  int th;
 
   if (!stream)
     stream = stderr;
@@ -3271,32 +3368,35 @@ rspec_dump(FILE *stream)			/* output stream */
   fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
 
   /* dump speculative integer regs */
-  for (i=0; i < MD_NUM_IREGS; i++)
-  {
-    if (BITMAP_SET_P(use_spec_R, R_BMAP_SZ, i))
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    for (i=0; i < MD_NUM_IREGS; i++)
     {
-      md_print_ireg(spec_regs_R, i, stream);
-      fprintf(stream, "\n");
+      if (BITMAP_SET_P(curr_th->use_spec_R, R_BMAP_SZ, i))
+      {
+        md_print_ireg(curr_th->spec_regs.regs_R, i, stream);
+        fprintf(stream, "\n");
+      }
     }
-  }
 
-  /* dump speculative FP regs */
-  for (i=0; i < MD_NUM_FREGS; i++)
-  {
-    if (BITMAP_SET_P(use_spec_F, F_BMAP_SZ, i))
+    /* dump speculative FP regs */
+    for (i=0; i < MD_NUM_FREGS; i++)
     {
-      md_print_fpreg(spec_regs_F, i, stream);
-      fprintf(stream, "\n");
+      if (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, i))
+      {
+        md_print_fpreg(curr_th->spec_regs.regs_F, i, stream);
+        fprintf(stream, "\n");
+      }
     }
-  }
 
-  /* dump speculative CTRL regs */
-  for (i=0; i < MD_NUM_CREGS; i++)
-  {
-    if (BITMAP_SET_P(use_spec_C, C_BMAP_SZ, i))
+    /* dump speculative CTRL regs */
+    for (i=0; i < MD_NUM_CREGS; i++)
     {
-      md_print_creg(spec_regs_C, i, stream);
-      fprintf(stream, "\n");
+      if (BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ, i))
+      {
+        md_print_creg(curr_th->spec_regs.regs_C, i, stream);
+        fprintf(stream, "\n");
+      }
     }
   }
 }
@@ -3322,12 +3422,12 @@ static struct spec_mem_ent *bucket_free_list = NULL;
 
 
 /* program counter */
-static md_addr_t pred_PC;
-static md_addr_t recover_PC;
+/* static md_addr_t pred_PC; */
+/* static md_addr_t recover_PC; */
 
 /* fetch unit next fetch address */
-static md_addr_t fetch_regs_PC;
-static md_addr_t fetch_pred_PC;
+/* static md_addr_t fetch_regs_PC; */
+/* static md_addr_t fetch_pred_PC; */
 
 /* IFETCH -> DISPATCH instruction queue definition */
 struct fetch_rec {
@@ -3337,19 +3437,20 @@ struct fetch_rec {
   int stack_recover_idx;		/* branch predictor RSB index */
   unsigned int ptrace_seq;		/* print trace sequence id */
 };
-static struct fetch_rec *fetch_data;	/* IFETCH -> DISPATCH inst queue */
-static int fetch_num;			/* num entries in IF -> DIS queue */
-static int fetch_tail, fetch_head;	/* head and tail pointers of queue */
+/* static struct fetch_rec *fetch_data;	/1* IFETCH -> DISPATCH inst queue *1/ */
+/* static int fetch_num;			/1* num entries in IF -> DIS queue *1/ */
+/* static int fetch_tail, fetch_head;	/1* head and tail pointers of queue *1/ */
 
 /* recover instruction trace generator state to precise state state immediately
    before the first mis-predicted branch; this is accomplished by resetting
    all register value copied-on-write bitmasks are reset, and the speculative
    memory hash table is cleared */
   static void
-tracer_recover(void)
+tracer_recover(int thread_id)
 {
   int i;
   struct spec_mem_ent *ent, *ent_next;
+  struct thread_t *curr_th = &(thread[thread_id]);
 
   /* better be in mis-speculative trace generation mode */
   if (!spec_mode)
@@ -3359,9 +3460,9 @@ tracer_recover(void)
   spec_mode = FALSE;
 
   /* reset copied-on-write register bitmasks back to non-speculative state */
-  BITMAP_CLEAR_MAP(use_spec_R, R_BMAP_SZ);
-  BITMAP_CLEAR_MAP(use_spec_F, F_BMAP_SZ);
-  BITMAP_CLEAR_MAP(use_spec_C, C_BMAP_SZ);
+  BITMAP_CLEAR_MAP(curr_th->use_spec_R, R_BMAP_SZ);
+  BITMAP_CLEAR_MAP(curr_th->use_spec_F, F_BMAP_SZ);
+  BITMAP_CLEAR_MAP(curr_th->use_spec_C, C_BMAP_SZ);
 
   /* reset memory state back to non-speculative state */
   /* FIXME: could version stamps be used here?!?!? */
@@ -3380,21 +3481,21 @@ tracer_recover(void)
   /* if pipetracing, indicate squash of instructions in the inst fetch queue */
   if (ptrace_active)
   {
-    while (fetch_num != 0)
+    while (curr_th->fetch_num != 0)
     {
       /* squash the next instruction from the IFETCH -> DISPATCH queue */
-      ptrace_endinst(fetch_data[fetch_head].ptrace_seq);
+      ptrace_endinst(curr_th->fetch_data[curr_th->fetch_head].ptrace_seq);
 
       /* consume instruction from IFETCH -> DISPATCH queue */
-      fetch_head = (fetch_head+1) & (ruu_ifq_size - 1);
-      fetch_num--;
+      curr_th->fetch_head = (curr_th->fetch_head+1) & (ruu_ifq_size - 1);
+      curr_th->fetch_num--;
     }
   }
 
   /* reset IFETCH state */
-  fetch_num = 0;
-  fetch_tail = fetch_head = 0;
-  fetch_pred_PC = fetch_regs_PC = recover_PC;
+  curr_th->fetch_num = 0;
+  curr_th->fetch_tail = curr_th->fetch_head = 0;
+  curr_th->fetch_pred_PC = curr_th->fetch_regs_PC = curr_th->recover_PC;
 }
 
 /* initialize the speculative instruction state generator state */
@@ -3402,14 +3503,18 @@ tracer_recover(void)
 tracer_init(void)
 {
   int i;
+  int th;
+  
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    /* initially in non-speculative mode */
+    curr_th->spec_mode = FALSE;
 
-  /* initially in non-speculative mode */
-  spec_mode = FALSE;
-
-  /* register state is from non-speculative state buffers */
-  BITMAP_CLEAR_MAP(use_spec_R, R_BMAP_SZ);
-  BITMAP_CLEAR_MAP(use_spec_F, F_BMAP_SZ);
-  BITMAP_CLEAR_MAP(use_spec_C, C_BMAP_SZ);
+    /* register state is from non-speculative state buffers */
+    BITMAP_CLEAR_MAP(curr_th->use_spec_R, R_BMAP_SZ);
+    BITMAP_CLEAR_MAP(curr_th->use_spec_F, F_BMAP_SZ);
+    BITMAP_CLEAR_MAP(curr_th->use_spec_C, C_BMAP_SZ);
+  }
 
   /* memory state is from non-speculative memory pages */
   for (i=0; i<STORE_HASH_SIZE; i++)
@@ -3670,6 +3775,7 @@ ruu_link_idep(struct RUU_station *rs,		/* rs station to link */
 {
   struct CV_link head;
   struct RS_link *link;
+  struct thread_t *curr_th = &(thread[rs->thread_id]);
 
   /* any dependence? */
   if (idep_name == NA)
@@ -3709,6 +3815,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
     int odep_name)			/* output register name */
 {
   struct CV_link cv;
+  struct thread_t *curr_th = &(thread[rs->thread_id]);
 
   /* any dependence? */
   if (odep_name == NA)
@@ -3777,135 +3884,135 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
  */
 
 /* next program counter */
-#define SET_NPC(EXPR)           (regs.regs_NPC = (EXPR))
+#define SET_NPC(EXPR)           (curr_th->regs.regs_NPC = (EXPR))
 
 /* target program counter */
 #undef  SET_TPC
-#define SET_TPC(EXPR)		(target_PC = (EXPR))
+#define SET_TPC(EXPR)		(curr_th->target_PC = (EXPR))
 
 /* current program counter */
-#define CPC                     (regs.regs_PC)
-#define SET_CPC(EXPR)           (regs.regs_PC = (EXPR))
+#define CPC                     (curr_th->regs.regs_PC)
+#define SET_CPC(EXPR)           (curr_th->regs.regs_PC = (EXPR))
 
 /* general purpose register accessors, NOTE: speculative copy on write storage
    provided for fast recovery during wrong path execute (see tracer_recover()
    for details on this process */
-#define GPR(N)                  (BITMAP_SET_P(use_spec_R, R_BMAP_SZ, (N))\
-    ? spec_regs_R[N]                       \
-    : regs.regs_R[N])
+#define GPR(N)                  (BITMAP_SET_P(curr_th->use_spec_R, R_BMAP_SZ, (N))\
+    ? curr_th->spec_regs.regs_R[N]                       \
+    : curr_th->regs.regs_R[N])
 #define SET_GPR(N,EXPR)         (spec_mode				\
-    ? ((spec_regs_R[N] = (EXPR)),		\
-      BITMAP_SET(use_spec_R, R_BMAP_SZ, (N)),\
-      spec_regs_R[N])			\
-      : (regs.regs_R[N] = (EXPR)))
+    ? ((curr_th->spec_regs.regs_R[N] = (EXPR)),		\
+      BITMAP_SET(curr_th->use_spec_R, R_BMAP_SZ, (N)),\
+      curr_th->spec_regs.regs_R[N])			\
+      : (curr_th->regs.regs_R[N] = (EXPR)))
 
 #if defined(TARGET_PISA)
 
 /* floating point register accessors, NOTE: speculative copy on write storage
    provided for fast recovery during wrong path execute (see tracer_recover()
    for details on this process */
-#define FPR_L(N)                (BITMAP_SET_P(use_spec_F, F_BMAP_SZ, ((N)&~1))\
-    ? spec_regs_F.l[(N)]                   \
-    : regs.regs_F.l[(N)])
+#define FPR_L(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
+    ? curr_th->spec_regs.regs_F.l[(N)]                   \
+    : curr_th->regs.regs_F.l[(N)])
 #define SET_FPR_L(N,EXPR)       (spec_mode				\
-    ? ((spec_regs_F.l[(N)] = (EXPR)),	\
-      BITMAP_SET(use_spec_F,F_BMAP_SZ,((N)&~1)),\
-      spec_regs_F.l[(N)])			\
-      : (regs.regs_F.l[(N)] = (EXPR)))
-#define FPR_F(N)                (BITMAP_SET_P(use_spec_F, F_BMAP_SZ, ((N)&~1))\
-    ? spec_regs_F.f[(N)]                   \
-    : regs.regs_F.f[(N)])
+    ? ((curr_th->spec_regs.regs_F.l[(N)] = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
+      curr_th->spec_regs.regs_F.l[(N)])			\
+      : (curr_th->regs.regs_F.l[(N)] = (EXPR)))
+#define FPR_F(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
+    ? curr_th->spec_regs.regs_F.f[(N)]                   \
+    : curr_th->regs.regs_F.f[(N)])
 #define SET_FPR_F(N,EXPR)       (spec_mode				\
-    ? ((spec_regs_F.f[(N)] = (EXPR)),	\
-      BITMAP_SET(use_spec_F,F_BMAP_SZ,((N)&~1)),\
-      spec_regs_F.f[(N)])			\
-      : (regs.regs_F.f[(N)] = (EXPR)))
-#define FPR_D(N)                (BITMAP_SET_P(use_spec_F, F_BMAP_SZ, ((N)&~1))\
-    ? spec_regs_F.d[(N) >> 1]              \
-    : regs.regs_F.d[(N) >> 1])
+    ? ((curr_th->spec_regs.regs_F.f[(N)] = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
+      curr_th->spec_regs.regs_F.f[(N)])			\
+      : (curr_th->regs.regs_F.f[(N)] = (EXPR)))
+#define FPR_D(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
+    ? curr_th->spec_regs.regs_F.d[(N) >> 1]              \
+    : curr_th->regs.regs_F.d[(N) >> 1])
 #define SET_FPR_D(N,EXPR)       (spec_mode				\
-    ? ((spec_regs_F.d[(N) >> 1] = (EXPR)),	\
-      BITMAP_SET(use_spec_F,F_BMAP_SZ,((N)&~1)),\
-      spec_regs_F.d[(N) >> 1])		\
-      : (regs.regs_F.d[(N) >> 1] = (EXPR)))
+    ? ((curr_th->spec_regs.regs_F.d[(N) >> 1] = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
+      curr_th->spec_regs.regs_F.d[(N) >> 1])		\
+      : (curr_th->regs.regs_F.d[(N) >> 1] = (EXPR)))
 
 /* miscellanous register accessors, NOTE: speculative copy on write storage
    provided for fast recovery during wrong path execute (see tracer_recover()
    for details on this process */
-#define HI			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ, /*hi*/0)\
-    ? spec_regs_C.hi			\
-    : regs.regs_C.hi)
+#define HI			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ, /*hi*/0)\
+    ? curr_th->spec_regs.regs_C.hi			\
+    : curr_th->regs.regs_C.hi)
 #define SET_HI(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.hi = (EXPR)),		\
-      BITMAP_SET(use_spec_C, C_BMAP_SZ,/*hi*/0),\
-      spec_regs_C.hi)			\
-      : (regs.regs_C.hi = (EXPR)))
-#define LO			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ, /*lo*/1)\
-    ? spec_regs_C.lo			\
-    : regs.regs_C.lo)
+    ? ((curr_th->spec_regs.regs_C.hi = (EXPR)),		\
+      BITMAP_SET(curr_th->use_spec_C, C_BMAP_SZ,/*hi*/0),\
+      curr_th->spec_regs.regs_C.hi)			\
+      : (curr_th->regs.regs_C.hi = (EXPR)))
+#define LO			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ, /*lo*/1)\
+    ? curr_th->spec_regs.regs_C.lo			\
+    : curr_th->regs.regs_C.lo)
 #define SET_LO(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.lo = (EXPR)),		\
-      BITMAP_SET(use_spec_C, C_BMAP_SZ,/*lo*/1),\
-      spec_regs_C.lo)			\
-      : (regs.regs_C.lo = (EXPR)))
-#define FCC			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ,/*fcc*/2)\
-    ? spec_regs_C.fcc			\
-    : regs.regs_C.fcc)
+    ? ((curr_th->spec_regs.regs_C.lo = (EXPR)),		\
+      BITMAP_SET(curr_th->use_spec_C, C_BMAP_SZ,/*lo*/1),\
+      curr_th->spec_regs.regs_C.lo)			\
+      : (curr_th->regs.regs_C.lo = (EXPR)))
+#define FCC			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fcc*/2)\
+    ? curr_th->spec_regs.regs_C.fcc			\
+    : curr_th->regs.regs_C.fcc)
 #define SET_FCC(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.fcc = (EXPR)),		\
-      BITMAP_SET(use_spec_C,C_BMAP_SZ,/*fcc*/2),\
-      spec_regs_C.fcc)			\
-      : (regs.regs_C.fcc = (EXPR)))
+    ? ((curr_th->spec_regs.regs_C.fcc = (EXPR)),		\
+      BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fcc*/2),\
+      curr_th->spec_regs.regs_C.fcc)			\
+      : (curr_th->regs.regs_C.fcc = (EXPR)))
 
 #elif defined(TARGET_ALPHA)
 
 /* floating point register accessors, NOTE: speculative copy on write storage
    provided for fast recovery during wrong path execute (see tracer_recover()
    for details on this process */
-#define FPR_Q(N)		(BITMAP_SET_P(use_spec_F, F_BMAP_SZ, (N))\
-    ? spec_regs_F.q[(N)]                   \
-    : regs.regs_F.q[(N)])
+#define FPR_Q(N)		(BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, (N))\
+    ? curr_th->spec_regs.regs_F.q[(N)]                   \
+    : curr_th->regs.regs_F.q[(N)])
 #define SET_FPR_Q(N,EXPR)	(spec_mode				\
-    ? ((spec_regs_F.q[(N)] = (EXPR)),	\
-      BITMAP_SET(use_spec_F,F_BMAP_SZ, (N)),\
-      spec_regs_F.q[(N)])			\
-      : (regs.regs_F.q[(N)] = (EXPR)))
-#define FPR(N)			(BITMAP_SET_P(use_spec_F, F_BMAP_SZ, (N))\
-    ? spec_regs_F.d[(N)]			\
-    : regs.regs_F.d[(N)])
+    ? ((curr_th->spec_regs.regs_F.q[(N)] = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ, (N)),\
+      curr_th->spec_regs.regs_F.q[(N)])			\
+      : (curr_th->regs.regs_F.q[(N)] = (EXPR)))
+#define FPR(N)			(BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, (N))\
+    ? curr_th->spec_regs.regs_F.d[(N)]			\
+    : curr_th->regs.regs_F.d[(N)])
 #define SET_FPR(N,EXPR)		(spec_mode				\
-    ? ((spec_regs_F.d[(N)] = (EXPR)),	\
-      BITMAP_SET(use_spec_F,F_BMAP_SZ, (N)),\
-      spec_regs_F.d[(N)])			\
-      : (regs.regs_F.d[(N)] = (EXPR)))
+    ? ((curr_th->spec_regs.regs_F.d[(N)] = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ, (N)),\
+      curr_th->spec_regs.regs_F.d[(N)])			\
+      : (curr_th->regs.regs_F.d[(N)] = (EXPR)))
 
 /* miscellanous register accessors, NOTE: speculative copy on write storage
    provided for fast recovery during wrong path execute (see tracer_recover()
    for details on this process */
-#define FPCR			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ,/*fpcr*/0)\
-    ? spec_regs_C.fpcr			\
-    : regs.regs_C.fpcr)
+#define FPCR			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fpcr*/0)\
+    ? curr_th->spec_regs.regs_C.fpcr			\
+    : curr_th->regs.regs_C.fpcr)
 #define SET_FPCR(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.fpcr = (EXPR)),	\
-      BITMAP_SET(use_spec_C,C_BMAP_SZ,/*fpcr*/0),\
-      spec_regs_C.fpcr)			\
-      : (regs.regs_C.fpcr = (EXPR)))
-#define UNIQ			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ,/*uniq*/1)\
-    ? spec_regs_C.uniq			\
-    : regs.regs_C.uniq)
+    ? ((curr_th->spec_regs.regs_C.fpcr = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fpcr*/0),\
+      curr_th->spec_regs.regs_C.fpcr)			\
+      : (curr_th->regs.regs_C.fpcr = (EXPR)))
+#define UNIQ			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*uniq*/1)\
+    ? curr_th->spec_regs.regs_C.uniq			\
+    : curr_th->regs.regs_C.uniq)
 #define SET_UNIQ(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.uniq = (EXPR)),	\
-      BITMAP_SET(use_spec_C,C_BMAP_SZ,/*uniq*/1),\
-      spec_regs_C.uniq)			\
-      : (regs.regs_C.uniq = (EXPR)))
-#define FCC			(BITMAP_SET_P(use_spec_C, C_BMAP_SZ,/*fcc*/2)\
-    ? spec_regs_C.fcc			\
-    : regs.regs_C.fcc)
+    ? ((curr_th->spec_regs.regs_C.uniq = (EXPR)),	\
+      BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*uniq*/1),\
+      curr_th->spec_regs.regs_C.uniq)			\
+      : (curr_th->regs.regs_C.uniq = (EXPR)))
+#define FCC			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fcc*/2)\
+    ? curr_th->spec_regs.regs_C.fcc			\
+    : curr_th->regs.regs_C.fcc)
 #define SET_FCC(EXPR)		(spec_mode				\
-    ? ((spec_regs_C.fcc = (EXPR)),		\
-      BITMAP_SET(use_spec_C,C_BMAP_SZ,/*fcc*/1),\
-      spec_regs_C.fcc)			\
-      : (regs.regs_C.fcc = (EXPR)))
+    ? ((curr_th->spec_regs.regs_C.fcc = (EXPR)),		\
+      BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fcc*/1),\
+      curr_th->spec_regs.regs_C.fcc)			\
+      : (curr_th->regs.regs_C.fcc = (EXPR)))
 
 #else
 #error No ISA target defined...
@@ -3964,6 +4071,8 @@ simoo_reg_obj(struct regs_t *xregs,		/* registers to access */
     int reg,				/* register number */
     struct eval_value_t *val)		/* input, output */
 {
+  struct thread_t *curr_th = &(thread[xregs->thread_id]);
+
   switch (rt)
   {
     case rt_gpr:
@@ -4049,20 +4158,20 @@ simoo_reg_obj(struct regs_t *xregs,		/* registers to access */
       if (!is_write)
       {
         val->type = et_addr;
-        val->value.as_addr = regs.regs_PC;
+        val->value.as_addr = curr_th->regs.regs_PC;
       }
       else
-        regs.regs_PC = eval_as_addr(*val);
+        curr_th->regs.regs_PC = eval_as_addr(*val);
       break;
 
     case rt_NPC:
       if (!is_write)
       {
         val->type = et_addr;
-        val->value.as_addr = regs.regs_NPC;
+        val->value.as_addr = curr_th->regs.regs_NPC;
       }
       else
-        regs.regs_NPC = eval_as_addr(*val);
+        curr_th->regs.regs_NPC = eval_as_addr(*val);
       break;
 
     default:
