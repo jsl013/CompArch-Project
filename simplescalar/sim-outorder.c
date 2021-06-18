@@ -435,7 +435,7 @@ static unsigned int ptrace_seq = 0;
 static int spec_mode = FALSE;
 
 /* cycles until fetch issue resumes */
-static unsigned ruu_fetch_issue_delay = 0;
+/* static unsigned ruu_fetch_issue_delay = 0; */
 
 /* perfect prediction enabled */
 static int pred_perfect = FALSE;
@@ -4446,7 +4446,7 @@ select_th(int *selected_th)
       selected_th[0] = th;
       n_select++;
     }
-    else if (curr_th->icount < min_icount[1]) {
+    else if (curr_th->icount <= min_icount[1]) {
       min_icount[1] = curr_th->icount;
       selected_th[1] = th;
       n_select++;
