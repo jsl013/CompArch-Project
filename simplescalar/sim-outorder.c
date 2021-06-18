@@ -135,6 +135,10 @@ struct thread_t {
 
   unsigned ruu_fetch_issue_delay;
 
+  int icount; /* I-COUNT scheduling policy counter */
+  int brcount; /* BR-COUNT scheduling policy counter */
+  int mcount; /* M-COUNT scheduling policy counter */
+
 } thread[16];
 
 /*
@@ -225,15 +229,6 @@ static char *cache_dl1_opt;
 /* l1 data cache hit latency (in cycles) */
 static int cache_dl1_lat;
 
-/* data cache MSHR config {<config>|none} */
-static char *cache_mshr_opt;
-
-/* data cache number of MSHR */
-static int cache_nmshr;
-
-/* data cache maximum misses per MSHR */
-static int cache_mshr_nmisses;
-
 /* l2 data cache config, i.e., {<config>|none} */
 static char *cache_dl2_opt;
 
@@ -251,12 +246,6 @@ static char *cache_il2_opt;
 
 /* l2 instruction cache hit latency (in cycles) */
 static int cache_il2_lat;
-
-/* number of FMT entries */
-static int nfmt;
-
-/* number of sFMT entries */
-static int nsfmt;
 
 /* flush caches on system calls */
 static int flush_on_syscalls;
@@ -407,37 +396,6 @@ static counter_t sim_total_branches = 0;
 /* cycle counter */
 static tick_t sim_cycle = 0;
 
-/* naive CPI stack */
-/* static int il1_miss_penalty = 7; */
-/* static int il2_miss_penalty = 32; */
-/* static int itlb_miss_penalty = 30; */
-/* static int dl1_miss_penalty = 7; */
-/* static int dl2_miss_penalty = 32; */
-/* static int dtlb_miss_penalty = 30; */
-/* static int branch_mispred_penalty = 2; */
-
-static counter_t naive_il1_miss_count = 0;
-static counter_t naive_il2_miss_count = 0;
-static counter_t naive_itlb_miss_count = 0;
-static counter_t naive_dl1_miss_count = 0;
-static counter_t naive_dl2_miss_count = 0;
-static counter_t naive_dtlb_miss_count = 0;
-static counter_t naive_branch_mispred_count = 0;
-
-/* CPI stack */
-static counter_t cpi_stack = 0;
-
-/* FMT */
-static counter_t fmt_il1_miss_count = 0;
-static counter_t fmt_il2_miss_count = 0;
-static counter_t fmt_itlb_miss_count = 0;
-static counter_t fmt_dl1_miss_count = 0;
-static counter_t fmt_dl2_miss_count = 0;
-static counter_t fmt_dtlb_miss_count = 0;
-static counter_t fmt_bpenalty_count = 0;
-static counter_t fmt_funct_stall_count = 0;
-
-
 /* occupancy counters */
 static counter_t IFQ_count;		/* cumulative IFQ occupancy */
 static counter_t IFQ_fcount;		/* cumulative IFQ full count */
@@ -459,95 +417,6 @@ static counter_t sim_invalid_addrs;
 #define L2_CACHE_MISS 0x00000002
 #define TLB_MISS      0x00000004
 
-static int fmt_dispatch_head = -1;
-static int fmt_dispatch_tail = -1;
-static int fmt_fetch = 0;
-static int fmt_should_plus = 0;
-
-static int frontend_miss_flag;
-static int backend_miss_flag;
-
-/* number of FMT valid entries */
-static int curr_nfmt = 0;
-
-struct fmt_t
-{
-  int ruu_id;
-  int mispred;
-  counter_t bpenalty_count;
-  counter_t local_il1_count;
-  counter_t local_il2_count;
-  counter_t local_itlb_count;
-} fmt[256];
-/* default size : 16*/
-
-static void fmt_init(void)
-{
-  for (int i=0; i<nfmt; i++) {
-    fmt[i].local_il1_count = 0;
-    fmt[i].local_il2_count = 0;
-    fmt[i].local_itlb_count = 0;
-  }
-}
-
-static int find_fmt_idx(int ruu_id) {
-  int i = (fmt_dispatch_head + 1) % nfmt;
-  int fmt_idx = -1;
-  for (;;) {
-    if (fmt[i].ruu_id == ruu_id) {
-      fmt_idx = i;
-      break;
-    }
-    else if (i == fmt_dispatch_tail) break;
-    else i = (i+1)%nfmt;
-  }
-  return fmt_idx;
-}
-
-/* sFMT */
-/* global counters */
-static counter_t sfmt_il1_miss_count = 0;
-static counter_t sfmt_il2_miss_count = 0;
-static counter_t sfmt_itlb_miss_count = 0;
-static counter_t sfmt_dl1_miss_count = 0;
-static counter_t sfmt_dl2_miss_count = 0;
-static counter_t sfmt_dtlb_miss_count = 0;
-static counter_t sfmt_bpenalty_count = 0;
-static counter_t sfmt_funct_stall_count = 0;
-
-/* static int sfmt_frontend_miss_flag; */
-
-/* local counters */
-static counter_t sfmt_local_il1_count = 0;
-static counter_t sfmt_local_il2_count = 0;
-static counter_t sfmt_local_itlb_count = 0;
-
-static int sfmt_dispatch_head = -1;
-static int sfmt_dispatch_tail = -1;
-static int sfmt_fetch = 0;
-static int sfmt_should_plus = 0;
-
-/* number of sFMT valid entries */
-static int curr_nsfmt = 0;
-
-struct sfmt_t
-{
-  int ruu_id;
-  int mispred;
-  counter_t bpenalty_count;
-} sfmt[256];
-
-static int find_sfmt_idx(int ruu_id) {
-  int i;
-  int sfmt_idx = -1;
-  for (i = (sfmt_dispatch_head + 1) % nsfmt; i != (sfmt_dispatch_tail+1)%nsfmt; i = (i+1) % nsfmt) {
-    if (sfmt[i].ruu_id == ruu_id) {
-      sfmt_idx = i;
-      break;
-    }
-  }
-  return sfmt_idx;
-}
 
 /*
  * simulator state variables
@@ -638,7 +507,8 @@ dl1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
     md_addr_t baddr,		/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,		/* time of access */
+    int thread_id) /* thread ID of cache block */
 {
   unsigned int lat;
 
@@ -646,7 +516,7 @@ dl1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
   {
     /* access next level of data cache hierarchy */
     lat = cache_access(cache_dl2, cmd, baddr, NULL, bsize,
-        /* now */now, /* pudata */NULL, /* repl addr */NULL);
+        /* now */now, /* pudata */NULL, /* repl addr */NULL, thread_id);
     if (cmd == Read)
       return lat;
     else
@@ -674,7 +544,8 @@ dl2_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
     md_addr_t baddr,		/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,		/* time of access */
+    int thread_id)
 {
   /* this is a miss to the lowest level, so access main memory */
   if (cmd == Read)
@@ -692,7 +563,8 @@ il1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
     md_addr_t baddr,		/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,		/* time of access */
+    int thread_id)
 {
   unsigned int lat;
 
@@ -700,7 +572,7 @@ il1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
   {
     /* access next level of inst cache hierarchy */
     lat = cache_access(cache_il2, cmd, baddr, NULL, bsize,
-        /* now */now, /* pudata */NULL, /* repl addr */NULL);
+        /* now */now, /* pudata */NULL, /* repl addr */NULL, thread_id);
     if (cmd == Read)
       return lat;
     else
@@ -722,7 +594,8 @@ il2_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
     md_addr_t baddr,		/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,		/* time of access */
+    int thread_id)
 {
   /* this is a miss to the lowest level, so access main memory */
   if (cmd == Read)
@@ -742,7 +615,8 @@ itlb_access_fn(enum mem_cmd cmd,	/* access cmd, Read or Write */
     md_addr_t baddr,		/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,   /* time of access */
+    int thread_id)		
 {
   md_addr_t *phy_page_ptr = (md_addr_t *)blk->user_data;
 
@@ -762,7 +636,8 @@ dtlb_access_fn(enum mem_cmd cmd,	/* access cmd, Read or Write */
     md_addr_t baddr,	/* block address to access */
     int bsize,		/* size of block to access */
     struct cache_blk_t *blk,	/* ptr to block in upper level */
-    tick_t now)		/* time of access */
+    tick_t now,		/* time of access */
+    int thread_id)
 {
   md_addr_t *phy_page_ptr = (md_addr_t *)blk->user_data;
 
@@ -971,15 +846,6 @@ sim_reg_options(struct opt_odb_t *odb)
       &cache_dl1_opt, "dl1:128:32:8:l", // baseline: i7
       /* print */TRUE, NULL);
 
-/* opt_reg_string(odb, "-cache:dl1:mshr", */
-/* "data cache MSHR config, i.e., {<config>|none}", */
-/* &cache_mshr_opt, "4:4", */
-/* /1* print *1/TRUE, NULL); */
-  opt_reg_string(odb, "-cache:dl1:mshr",
-      "data cache MSHR config, i.e., {<config>|none}",
-      &cache_mshr_opt, "4:4", 
-      /* print */TRUE, NULL);
-
   opt_reg_note(odb,
       "  The cache config parameter <config> has the following format:\n"
       "\n"
@@ -1112,16 +978,6 @@ sim_reg_options(struct opt_odb_t *odb)
   opt_reg_flag(odb, "-bugcompat",
       "operate in backward-compatible bugs mode (for testing only)",
       &bugcompat_mode, /* default */FALSE, /* print */TRUE, NULL);
-
-  opt_reg_int(odb, "-fmt:nfmt",
-      "total number of FMT entries",
-      &nfmt, /* default */128,
-      /* print */TRUE, /* format */NULL);
-
-  opt_reg_int(odb, "-sfmt:nsfmt",
-      "total number of sFMT entries",
-      &nsfmt, /* default */128,
-      /* print */TRUE, /* format */NULL);
 }
 
 /* check simulator-specific option values */
@@ -1246,12 +1102,6 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
   if (LSQ_size < 2 || (LSQ_size & (LSQ_size-1)) != 0)
     fatal("LSQ size must be a positive number > 1 and a power of two");
 
-  sscanf(cache_mshr_opt, "%d:%d", &cache_nmshr, &cache_mshr_nmisses);
-  if (cache_nmshr < 1)
-    fatal("Number of MSHR must be a positive number > 1");
-  if (cache_mshr_nmisses < 1)
-    fatal("Number of misses per MSHR must be a positive number > 1");
-
   /* use a level 1 D-cache? */
   if (!mystricmp(cache_dl1_opt, "none"))
   {
@@ -1269,7 +1119,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 D-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_dl1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        dl1_access_fn, /* hit lat */cache_dl1_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+        dl1_access_fn, /* hit lat */cache_dl1_lat);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_dl2_opt, "none"))
@@ -1282,7 +1132,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_dl2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          dl2_access_fn, /* hit lat */cache_dl2_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+          dl2_access_fn, /* hit lat */cache_dl2_lat);
     }
   }
 
@@ -1325,7 +1175,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 I-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_il1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        il1_access_fn, /* hit lat */cache_il1_lat, /* nmshr */0, /* mshr_nmisses */0);
+        il1_access_fn, /* hit lat */cache_il1_lat);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_il2_opt, "none"))
@@ -1344,7 +1194,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_il2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          il2_access_fn, /* hit lat */cache_il2_lat, /* nmshr */0, /* mshr_nmisses */0);
+          il2_access_fn, /* hit lat */cache_il2_lat);
     }
   }
 
@@ -1359,7 +1209,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     itlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), itlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1);
   }
 
   /* use a D-TLB? */
@@ -1373,7 +1223,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     dtlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), dtlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1);
   }
 
   if (cache_dl1_lat < 1)
@@ -1556,76 +1406,6 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
   if (pred)
     bpred_reg_stats(pred, sdb);
 
-  /* MSHR stats */
-
-  /* FMT stats */
-  stat_reg_counter(sdb, "FMT_il1", "FMT L1 I-cache miss counts",
-      &fmt_il1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_il2", "FMT L2 I-cache miss counts",
-      &fmt_il2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_itlb", "FMT I-TLB miss counts",
-      &fmt_itlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_dl1", "FMT L1 D-cache miss counts",
-      &fmt_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_dl2", "FMT L2 D-cache miss counts",
-      &fmt_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_dtlb", "FMT D-TLB miss counts",
-      &fmt_dtlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_bpenalty", "FMT branch mispredict penalty counts",
-      &fmt_bpenalty_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "FMT_funct_stall", "FMT functional unit stall counts",
-      &fmt_funct_stall_count, /* initial value */0, /* format */NULL);
-
-  stat_reg_counter(sdb, "naive_il1", "naive L1 I-cache miss counts",
-      &naive_il1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_il2", "naive L2 I-cache miss counts",
-      &naive_il2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_itlb", "naive I-TLB miss counts",
-      &naive_itlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dl1", "naive L1 D-cache miss counts",
-      &naive_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dl2", "naive L2 D-cache miss counts",
-      &naive_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dtlb", "naive D-TLB miss counts",
-      &naive_dtlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_bpenalty", "naive branch mispredict penalty counts",
-      &naive_branch_mispred_count, /* initial value */0, /* format */NULL);
-
-//  stat_reg_formula(sdb, "fmt_il1_rate", "FMT L1 I-cache miss rate",
-//      "fmt_il1_miss_count / sim_num_insn", NULL);
-//  stat_reg_formula(sdb, "FMT_il2_rate", "FMT L2 I-cache miss rate",
-//      "fmt_il2_miss_count", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_itlb_rate", "FMT I-TLB miss rate",
-//      "fmt_itlb_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dl1_rate", "FMT L1 D-cache miss rate",
-//      "fmt_dl1_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dl2_rate", "FMT L2 D-cache miss rate",
-//      "fmt_dl2_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dtlb_rate", "FMT D-TLB miss rate",
-//      "fmt_dtlb_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_bpenalty_rate", "FMT branch mispredict penalty rate",
-//      "fmt_bpenalty_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_funct_stall_rate", "FMT functional unit stall rate",
-//      "fmt_funct_stall_count / cpi_stack", /* format */NULL);
-
-  /* sFMT stats */
-  stat_reg_counter(sdb, "sFMT il1", "sFMT L1 I-cache miss counts",
-      &sfmt_il1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT il2", "sFMT L2 I-cache miss counts",
-      &sfmt_il2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT itlb", "sFMT I-TLB miss counts",
-      &sfmt_itlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dl1", "sFMT L1 D-cache miss counts",
-      &sfmt_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dl2", "sFMT L1 D-cache miss counts",
-      &sfmt_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dtlb", "sFMT L1 D-TLB miss counts",
-      &sfmt_dtlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT bpenalty", "sFMT branch mispredict penalty counts",
-      &sfmt_bpenalty_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT funct stall", "sFMT functional unit stall counts",
-      &sfmt_funct_stall_count, /* initial value */0, /* format */NULL);
-
   /* register cache stats */
   if (cache_il1
       && (cache_il1 != cache_dl1 && cache_il1 != cache_dl2))
@@ -1697,16 +1477,16 @@ static void fetch_init(void);
   void
 sim_init(void)
 {
-  int i;
+  int th;
   sim_num_refs = 0;
 
-  for (i=0; i<nthread; ++i) {
+  for (th=0; th<nthread; ++th) {
     /* allocate and initialize register file */
-    regs_init(&(thread[i].regs));
+    regs_init(&(thread[th].regs));
 
     /* allocate and initialize memory space */
-    thread[i].mem = mem_create("mem");
-    mem_init(thread[i].mem);
+    thread[th].mem = mem_create("mem");
+    mem_init(thread[th].mem);
   }
 }
 
@@ -1742,10 +1522,10 @@ sim_load_prog(char *fname,		/* program to load */
     int argc, char **argv,	/* program arguments */
     char **envp)		/* program environment */
 {
-  int i;
+  int th;
   /* load program text and data, set up environment, memory, and regs */
-  for (i=0; i<nthread; ++i) {
-    ld_load_prog(fname, argc, argv, envp, &(thread[i].regs), thread[i].mem, TRUE);
+  for (th=0; th<nthread; ++th) {
+    ld_load_prog(fname, argc, argv, envp, &(thread[th].regs), thread[th].mem, TRUE);
   }
 
   /* initialize here, so symbols can be loaded */
@@ -1771,7 +1551,6 @@ sim_load_prog(char *fname,		/* program to load */
   readyq_init();
   ruu_init();
   lsq_init();
-  fmt_init();
 
   /* initialize the DLite debugger */
   dlite_init(simoo_reg_obj, simoo_mem_obj, simoo_mstate_obj);
@@ -1860,8 +1639,6 @@ struct RUU_station {
      operands are known to be read (see lsq_refresh() for details on
      enforcing memory dependencies) */
   int idep_ready[MAX_IDEPS];		/* input operand ready? */
-  int backend_miss_flag; /* D-cache/D-TLB miss bit for sFMT */
-  int frontend_miss_flag; /* I-cache/I-TLB miss bit for sFMT */
   int thread_id; /* thread ID for multithreading */
 };
 
@@ -1879,14 +1656,14 @@ struct RUU_station {
   static void
 ruu_init(void)
 {
-  int i;
-  for (i=0; i<nthread; ++i) {
-    thread[i].RUU = calloc(RUU_size, sizeof(struct RUU_station));
-    if (!thread[i].RUU)
+  int th;
+  for (th=0; th<nthread; ++th) {
+    thread[th].RUU = calloc(RUU_size, sizeof(struct RUU_station));
+    if (!thread[th].RUU)
       fatal("out of virtual memory");
 
-    thread[i].RUU_num = 0;
-    thread[i].RUU_head = thread[i].RUU_tail = 0;
+    thread[th].RUU_num = 0;
+    thread[th].RUU_head = thread[th].RUU_tail = 0;
     RUU_count = 0;
     RUU_fcount = 0;
   }
@@ -1933,22 +1710,22 @@ ruu_dumpent(struct RUU_station *rs,		/* ptr to RUU station */
 ruu_dump(FILE *stream)				/* output stream */
 {
   int num, head;
-  int i;
+  int th;
   struct RUU_station *rs;
 
   if (!stream)
     stream = stderr;
 
-  for (i=0; i<nthread; ++i) {
-    fprintf(stream, "** RUU state of thread %d**\n", i);
-    fprintf(stream, "RUU_head: %d, RUU_tail: %d\n", thread[i].RUU_head, thread[i].RUU_tail);
-    fprintf(stream, "RUU_num: %d\n", thread[i].RUU_num);
-    num = thread[i].RUU_num;
-    head = thread[i].RUU_head;
+  for (th=0; th<nthread; ++th) {
+    fprintf(stream, "** RUU state of thread %d**\n", th);
+    fprintf(stream, "RUU_head: %d, RUU_tail: %d\n", thread[th].RUU_head, thread[th].RUU_tail);
+    fprintf(stream, "RUU_num: %d\n", thread[th].RUU_num);
+    num = thread[th].RUU_num;
+    head = thread[th].RUU_head;
     while (num)
     {
-      rs = &(thread[i].RUU[head]);
-      ruu_dumpent(rs, rs - thread[i].RUU, stream, /* header */TRUE);
+      rs = &(thread[th].RUU[head]);
+      ruu_dumpent(rs, rs - thread[th].RUU, stream, /* header */TRUE);
       head = (head + 1) % RUU_size;
       num--;
     }
@@ -2002,14 +1779,14 @@ ruu_dump(FILE *stream)				/* output stream */
   static void
 lsq_init(void)
 {
-  int i;
-  for (i=0; i<nthread; ++i) {
-    thread[i].LSQ = calloc(LSQ_size, sizeof(struct RUU_station));
-    if (!thread[i].LSQ)
+  int th;
+  for (th=0; th<nthread; ++th) {
+    thread[th].LSQ = calloc(LSQ_size, sizeof(struct RUU_station));
+    if (!thread[th].LSQ)
       fatal("out of virtual memory");
 
-    thread[i].LSQ_num = 0;
-    thread[i].LSQ_head = thread[i].LSQ_tail = 0;
+    thread[th].LSQ_num = 0;
+    thread[th].LSQ_head = thread[th].LSQ_tail = 0;
   }
   LSQ_count = 0;
   LSQ_fcount = 0;
@@ -2020,23 +1797,23 @@ lsq_init(void)
 lsq_dump(FILE *stream)				/* output stream */
 {
   int num, head;
-  int i;
+  int th;
   struct RUU_station *rs;
 
   if (!stream)
     stream = stderr;
 
-  for (i=0; i<nthread; ++i) {
-    fprintf(stream, "** LSQ state of thread %d **\n", i);
-    fprintf(stream, "LSQ_head: %d, LSQ_tail: %d\n", thread[i].LSQ_head, thread[i].LSQ_tail);
-    fprintf(stream, "LSQ_num: %d\n", thread[i].LSQ_num);
+  for (th=0; th<nthread; ++th) {
+    fprintf(stream, "** LSQ state of thread %d **\n", th);
+    fprintf(stream, "LSQ_head: %d, LSQ_tail: %d\n", thread[th].LSQ_head, thread[th].LSQ_tail);
+    fprintf(stream, "LSQ_num: %d\n", thread[th].LSQ_num);
 
-    num = thread[i].LSQ_num;
-    head = thread[i].LSQ_head;
+    num = thread[th].LSQ_num;
+    head = thread[th].LSQ_head;
     while (num)
     {
-      rs = &(thread[i].LSQ[head]);
-      ruu_dumpent(rs, rs - thread[i].LSQ, stream, /* header */TRUE);
+      rs = &(thread[th].LSQ[head]);
+      ruu_dumpent(rs, rs - thread[th].LSQ, stream, /* header */TRUE);
       head = (head + 1) % LSQ_size;
       num--;
     }
@@ -2547,24 +2324,12 @@ ruu_commit(void)
               /* commit store value to D-cache */
               lat =
                 cache_access(cache_dl1, Write, (curr_th->LSQ[curr_th->LSQ_head].addr&~3),
-                    NULL, 4, sim_cycle, NULL, NULL);
+                    NULL, 4, sim_cycle, NULL, NULL, th);
               if (lat > cache_dl1_lat)
                 events |= PEV_CACHEMISS;
               if (lat == CACHE_BLKED) {
                 fu->master->busy = 0;
                 break;
-              }
-              if (dl1_misses < cache_dl1->misses) {
-                if (dl2_misses < cache_dl2->misses){
-                  backend_miss_flag |= L2_CACHE_MISS;
-                  rs->backend_miss_flag = L2_CACHE_MISS;
-                  naive_dl2_miss_count++;
-                }
-                else {
-                  backend_miss_flag |= L1_CACHE_MISS;
-                  rs->backend_miss_flag = L1_CACHE_MISS;
-                  naive_dl1_miss_count++;
-                }
               }
             }
 
@@ -2574,12 +2339,9 @@ ruu_commit(void)
               /* access the D-TLB */
               lat =
                 cache_access(dtlb, Read, (curr_th->LSQ[curr_th->LSQ_head].addr & ~3),
-                    NULL, 4, sim_cycle, NULL, NULL);
+                    NULL, 4, sim_cycle, NULL, NULL, th);
               if (lat > 1) {
                 events |= PEV_TLBMISS;
-                backend_miss_flag |= TLB_MISS;
-                rs->backend_miss_flag = TLB_MISS;
-                naive_dtlb_miss_count++;
               }
             }
           }
@@ -2617,54 +2379,6 @@ ruu_commit(void)
             /* correct pred? */rs->pred_PC == rs->next_PC,
             /* opcode */rs->op,
             /* dir predictor update pointer */&rs->dir_update);
-      }
-
-      if (MD_OP_FLAGS(rs->op) & F_CTRL)
-      {
-        int fmt_index = (fmt_dispatch_head + 1) % nfmt; /* it should be fmt_dispatch_head + 1*/
-        int sfmt_index = (sfmt_dispatch_head + 1) % nsfmt; /* it should be sfmt_dispatch_head + 1*/
-        if (fmt_index == -1 || sfmt_index == -1)
-          panic("There is no allocated branch inst in FMT/sFMT"); 
-        else {
-          if (fmt[fmt_index].mispred) { /* branch misprediction */
-            if (sim_num_insn > warmup_count)
-              fmt_bpenalty_count += fmt[fmt_index].bpenalty_count;
-            /* global branch misprediction penalty counter should be incremented until new inst enter RUU */
-            fmt_should_plus = 1;
-          }
-          else if (sim_num_insn > warmup_count) {
-            fmt_il1_miss_count += fmt[fmt_index].local_il1_count;
-            fmt_il2_miss_count += fmt[fmt_index].local_il2_count;
-            fmt_itlb_miss_count += fmt[fmt_index].local_itlb_count;
-          }
-          if (sfmt[sfmt_index].mispred) {
-            if (sim_num_insn > warmup_count)
-              sfmt_bpenalty_count += sfmt[sfmt_index].bpenalty_count;
-            sfmt_local_itlb_count = 0;
-            sfmt_local_il1_count = 0;
-            sfmt_local_il2_count = 0;
-            sfmt_should_plus = 1;
-          }
-          sfmt_dispatch_head = (sfmt_dispatch_head + 1) % nsfmt;
-          curr_nsfmt--;
-
-          fmt_dispatch_head = (fmt_dispatch_head + 1) % nfmt;
-          curr_nfmt--;
-        }
-      }
-
-      if (rs->frontend_miss_flag) {
-        if (sim_num_insn > warmup_count) {
-          sfmt_itlb_miss_count += sfmt_local_itlb_count;
-          sfmt_il1_miss_count += sfmt_local_il1_count;
-          sfmt_il2_miss_count += sfmt_local_il2_count;
-        }
-        sfmt_local_itlb_count = 0;
-        sfmt_local_il1_count = 0;
-        sfmt_local_il2_count = 0;
-        for (int i=0; i<curr_th->RUU_num; ++i) {
-          curr_th->RUU[(curr_th->RUU_head+i)%RUU_size].frontend_miss_flag = 0;
-        }
       }
 
       /* invalidate RUU operation instance */
@@ -2715,7 +2429,6 @@ ruu_recover(int thread_id, int branch_index)			/* index of mis-pred branch */
   struct thread_t *curr_th = &(thread[thread_id]);
   int i, RUU_index = curr_th->RUU_tail, LSQ_index = curr_th->LSQ_tail;
   int RUU_prev_tail = curr_th->RUU_tail, LSQ_prev_tail = curr_th->LSQ_tail;
-  int fmt_index, sfmt_index;
   /* recover from the tail of the RUU towards the head until the branch index
      is reached, this direction ensures that the LSQ can be synchronized with
      the RUU */
@@ -2723,44 +2436,6 @@ ruu_recover(int thread_id, int branch_index)			/* index of mis-pred branch */
   /* go to first element to squash */
   RUU_index = (RUU_index + (RUU_size-1)) % RUU_size;
   LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
-
-  /* FMT flush */
-  fmt_index = find_fmt_idx(branch_index); 
-  sfmt_index = find_sfmt_idx(branch_index); 
-  if (fmt_index == -1 || sfmt_index == -1)
-    panic("There is no allocated branch inst in FMT/sFMT"); 
-  /* flush the branches in a wrong path */
-  fmt[fmt_index].mispred = 1;
-  if (fmt_index < fmt_dispatch_head) {
-    curr_nfmt = nfmt - fmt_dispatch_head + fmt_index;
-  }
-  else {
-    curr_nfmt = fmt_index - fmt_dispatch_head;
-  }
-  fmt_dispatch_tail = fmt_index;
-  fmt_fetch = (fmt_dispatch_tail + 1) % nfmt;
-  fmt[fmt_fetch].ruu_id = 0;
-  fmt[fmt_fetch].mispred = 0;
-  fmt[fmt_fetch].bpenalty_count = 0;
-  fmt[fmt_fetch].local_il1_count = 0;
-  fmt[fmt_fetch].local_il2_count = 0;
-  fmt[fmt_fetch].local_itlb_count = 0;
-  
-
-  sfmt[sfmt_index].mispred = 1;
-  if (sfmt_index < sfmt_dispatch_head) {
-    curr_nsfmt = nsfmt - sfmt_dispatch_head + sfmt_index;
-  }
-  else {
-    curr_nsfmt = sfmt_index - sfmt_dispatch_head;
-  }
-  sfmt_dispatch_tail = sfmt_index;
-  sfmt_fetch = (sfmt_dispatch_tail + 1) % nsfmt;
-  sfmt[sfmt_fetch].ruu_id = 0;
-  sfmt[sfmt_fetch].mispred = 0;
-  sfmt[sfmt_fetch].bpenalty_count = 0;
-
-  naive_branch_mispred_count++;
 
   /* traverse to older insts until the mispredicted branch is encountered */
   while (RUU_index != branch_index)
@@ -3211,7 +2886,7 @@ ruu_issue(void)
                   load_lat =
                     cache_access(cache_dl1, Read,
                         (rs->addr & ~3), NULL, 4,
-                        sim_cycle, NULL, NULL);
+                        sim_cycle, NULL, NULL, rs->thread_id);
                   if (load_lat > cache_dl1_lat)
                     events |= PEV_CACHEMISS;
                   if (load_lat == CACHE_BLKED) {
@@ -3239,7 +2914,7 @@ ruu_issue(void)
                    initiate speculative TLB misses */
                 tlb_lat =
                   cache_access(dtlb, Read, (rs->addr & ~3),
-                      NULL, 4, sim_cycle, NULL, NULL);
+                      NULL, 4, sim_cycle, NULL, NULL, rs->thread_id);
                 if (tlb_lat > 1)
                   events |= PEV_TLBMISS;
 
@@ -3508,7 +3183,7 @@ tracer_init(void)
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
     /* initially in non-speculative mode */
-    curr_th->spec_mode = FALSE;
+    spec_mode = FALSE;
 
     /* register state is from non-speculative state buffers */
     BITMAP_CLEAR_MAP(curr_th->use_spec_R, R_BMAP_SZ);
@@ -3888,7 +3563,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 
 /* target program counter */
 #undef  SET_TPC
-#define SET_TPC(EXPR)		(curr_th->target_PC = (EXPR))
+#define SET_TPC(EXPR)		(target_PC = (EXPR))
 
 /* current program counter */
 #define CPC                     (curr_th->regs.regs_PC)
@@ -4215,20 +3890,26 @@ ruu_dispatch(void)
   qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
   enum md_fault_type fault;
+  int th_id = 0;
 
   made_check = FALSE;
   n_dispatched = 0;
   while (/* instruction decode B/W left? */
       n_dispatched < (ruu_decode_width * fetch_speed)
-      /* RUU and LSQ not full? */
-      && RUU_num < RUU_size && LSQ_num < LSQ_size
-      /* insts still available from fetch unit? */
-      && fetch_num != 0
+      /* all threads done? */
+      && th_id < nthread
       /* on an acceptable trace path */
       && (ruu_include_spec || !spec_mode))
   {
-/* reset the backend miss flag if new dispatch is able */
-/* backend_miss_flag = CACHE_HIT; */
+    struct thread_t *curr_th = &(thread[th_id]);
+
+      if (/* RUU and LSQ not full? */
+      curr_th->RUU_num >= RUU_size || curr_th->LSQ_num >= LSQ_size
+      /* insts still available from fetch unit? */
+      || curr_th->fetch_num == 0) {
+        th_id++;
+        continue;
+      }
 
     /* if issuing in-order, block until last op issues if inorder issue */
     if (ruu_inorder_issue
@@ -4240,24 +3921,25 @@ ruu_dispatch(void)
     }
 
     /* get the next instruction from the IFETCH -> DISPATCH queue */
-    inst = fetch_data[fetch_head].IR;
-    regs.regs_PC = fetch_data[fetch_head].regs_PC;
-    pred_PC = fetch_data[fetch_head].pred_PC;
-    dir_update_ptr = &(fetch_data[fetch_head].dir_update);
-    stack_recover_idx = fetch_data[fetch_head].stack_recover_idx;
-    pseq = fetch_data[fetch_head].ptrace_seq;
+    inst = curr_th->fetch_data[curr_th->fetch_head].IR;
+    curr_th->regs.regs_PC = curr_th->fetch_data[curr_th->fetch_head].regs_PC;
+    curr_th->pred_PC = curr_th->fetch_data[curr_th->fetch_head].pred_PC;
+    dir_update_ptr = &(curr_th->fetch_data[curr_th->fetch_head].dir_update);
+    stack_recover_idx = curr_th->fetch_data[curr_th->fetch_head].stack_recover_idx;
+    pseq = curr_th->fetch_data[curr_th->fetch_head].ptrace_seq;
 
     /* decode the inst */
     MD_SET_OPCODE(op, inst);
 
     /* compute default next PC */
-    regs.regs_NPC = regs.regs_PC + sizeof(md_inst_t);
+    curr_th->regs.regs_NPC = curr_th->regs.regs_PC + sizeof(md_inst_t);
 
     /* drain RUU for TRAPs and system calls */
     if (MD_OP_FLAGS(op) & F_TRAP)
     {
-      if (RUU_num != 0)
+      if (curr_th->RUU_num != 0) {
         break;
+      }
 
       /* else, syscall is only instruction in the machine, at this
          point we should not be in (mis-)speculative mode */
@@ -4266,9 +3948,9 @@ ruu_dispatch(void)
     }
 
     /* maintain $r0 semantics (in spec and non-spec space) */
-    regs.regs_R[MD_REG_ZERO] = 0; spec_regs_R[MD_REG_ZERO] = 0;
+    curr_th->regs.regs_R[MD_REG_ZERO] = 0; curr_th->spec_regs.regs_R[MD_REG_ZERO] = 0;
 #ifdef TARGET_ALPHA
-    regs.regs_F.d[MD_REG_ZERO] = 0.0; spec_regs_F.d[MD_REG_ZERO] = 0.0;
+    curr_th->regs.regs_F.d[MD_REG_ZERO] = 0.0; curr_th->spec_regs.regs_F.d[MD_REG_ZERO] = 0.0;
 #endif /* TARGET_ALPHA */
 
     if (!spec_mode)
@@ -4332,15 +4014,15 @@ ruu_dispatch(void)
     {
       myfprintf(stderr, "++ %10n [xor: 0x%08x] {%d} @ 0x%08p: ",
           sim_num_insn, md_xor_regs(&regs),
-          inst_seq+1, regs.regs_PC);
-      md_print_insn(inst, regs.regs_PC, stderr);
+          inst_seq+1, curr_th->regs.regs_PC);
+      md_print_insn(inst, curr_th->regs.regs_PC, stderr);
       fprintf(stderr, "\n");
       /* fflush(stderr); */
     }
 
     if (fault != md_fault_none)
       fatal("non-speculative fault (%d) detected @ 0x%08p",
-          fault, regs.regs_PC);
+          fault, curr_th->regs.regs_PC);
 
     /* update memory access stats */
     if (MD_OP_FLAGS(op) & F_MEM)
@@ -4359,40 +4041,41 @@ ruu_dispatch(void)
       }
     }
 
-    br_taken = (regs.regs_NPC != (regs.regs_PC + sizeof(md_inst_t)));
-    br_pred_taken = (pred_PC != (regs.regs_PC + sizeof(md_inst_t)));
+    br_taken = (curr_th->regs.regs_NPC != (curr_th->regs.regs_PC + sizeof(md_inst_t)));
+    br_pred_taken = (curr_th->pred_PC != (curr_th->regs.regs_PC + sizeof(md_inst_t)));
 
     /* Check for perfection prediction inconsistencies. */
-    if (pred_PC != regs.regs_NPC && pred_perfect)
+    if (curr_th->pred_PC != curr_th->regs.regs_NPC && pred_perfect)
     {
-      pred_PC = regs.regs_NPC;
-      fetch_pred_PC = fetch_regs_PC = regs.regs_NPC;
-      fetch_head = (ruu_ifq_size-1);
-      fetch_num = 1;
-      fetch_tail = 0;
+      curr_th->pred_PC = curr_th->regs.regs_NPC;
+      curr_th->fetch_pred_PC = curr_th->fetch_regs_PC = curr_th->regs.regs_NPC;
+      curr_th->fetch_head = (ruu_ifq_size-1);
+      curr_th->fetch_num = 1;
+      curr_th->fetch_tail = 0;
       fetch_redirected = TRUE;
     }
     /* Check for misfetch - we've predicted the branch taken, but our
      * predicted target doesn't match the computed target.  Just update
      * the PC values and do a fetch squash. */
     else if ((MD_OP_FLAGS(op) & (F_CTRL|F_DIRJMP)) == (F_CTRL|F_DIRJMP) 
-        && target_PC != pred_PC && br_pred_taken)
+        && target_PC != curr_th->pred_PC && br_pred_taken)
     {
       misfetch_count++;
       recovery_count++;
 
-      fetch_head = (ruu_ifq_size-1);
-      fetch_num = 1;
-      fetch_tail = 0;
-      ruu_fetch_issue_delay += ruu_branch_penalty;
+      curr_th->fetch_head = (ruu_ifq_size-1);
+      curr_th->icount -= curr_th->fetech_num - 1;
+      curr_th->fetch_num = 1;
+      curr_th->fetch_tail = 0;
+      curr_th->ruu_fetch_issue_delay += ruu_branch_penalty;
 
       if (mf_compat) {
-        fetch_pred_PC = fetch_regs_PC = regs.regs_NPC;
+        curr_th->fetch_pred_PC = curr_th->fetch_regs_PC = curr_th->regs.regs_NPC;
         fetch_redirected = TRUE;
         misfetch_only_count++;
       }
       else {
-        fetch_pred_PC = fetch_regs_PC = target_PC;
+        curr_th->fetch_pred_PC = curr_th->fetch_regs_PC = target_PC;
         if (br_taken) {
           fetch_redirected = TRUE;
           misfetch_only_count++;
@@ -4419,12 +4102,13 @@ ruu_dispatch(void)
          */
 
       /* fill in RUU reservation station */
-      rs = &RUU[RUU_tail];
+      rs = &(curr_th->RUU[curr_th->RUU_tail]);
+      rs->thread_id = th_id;
       rs->slip = sim_cycle - 1;
       rs->IR = inst;
       rs->op = op;
-      rs->PC = regs.regs_PC;
-      rs->next_PC = regs.regs_NPC; rs->pred_PC = pred_PC;
+      rs->PC = curr_th->regs.regs_PC;
+      rs->next_PC = curr_th->regs.regs_NPC; rs->pred_PC = curr_th->pred_PC;
       rs->in_LSQ = FALSE;
       rs->ea_comp = FALSE;
       rs->recover_inst = FALSE;
@@ -4436,16 +4120,6 @@ ruu_dispatch(void)
       rs->seq = ++inst_seq;
       rs->queued = rs->issued = rs->completed = FALSE;
       rs->ptrace_seq = pseq;
-/* if (sfmt_frontend_miss_flag != CACHE_HIT) { */
-/* rs->frontend_miss_flag = 1; */
-/* sfmt_frontend_miss_flag = 0; */
-/* } */
-      if (ruu_fetch_issue_delay == 0) {
-        rs->frontend_miss_flag = TRUE;
-      }
-      else {
-        rs->frontend_miss_flag = FALSE;
-      }
 
       /* split ld/st's into two operations: eff addr comp + mem access */
       if (MD_OP_FLAGS(op) & F_MEM)
@@ -4455,12 +4129,13 @@ ruu_dispatch(void)
         rs->ea_comp = TRUE;
 
         /* fill in LSQ reservation station */
-        lsq = &LSQ[LSQ_tail];
+        lsq = &(curr_th->LSQ[curr_th->LSQ_tail]);
+        lsq->thread_id = th_id;
         lsq->slip = sim_cycle - 1;
         lsq->IR = inst;
         lsq->op = op;
-        lsq->PC = regs.regs_PC;
-        lsq->next_PC = regs.regs_NPC; lsq->pred_PC = pred_PC;
+        lsq->PC = curr_th->regs.regs_PC;
+        lsq->next_PC = curr_th->regs.regs_NPC; lsq->pred_PC = curr_th->pred_PC;
         lsq->in_LSQ = TRUE;
         lsq->ea_comp = FALSE;
         lsq->recover_inst = FALSE;
@@ -4502,10 +4177,10 @@ ruu_dispatch(void)
 
         /* install operation in the RUU and LSQ */
         n_dispatched++;
-        RUU_tail = (RUU_tail + 1) % RUU_size;
-        RUU_num++;
-        LSQ_tail = (LSQ_tail + 1) % LSQ_size;
-        LSQ_num++;
+        curr_th->RUU_tail = (curr_th->RUU_tail + 1) % RUU_size;
+        curr_th->RUU_num++;
+        curr_th->LSQ_tail = (curr_th->LSQ_tail + 1) % LSQ_size;
+        curr_th->LSQ_num++;
 
         if (OPERANDS_READY(rs))
         {
@@ -4537,8 +4212,8 @@ ruu_dispatch(void)
 
         /* install operation in the RUU */
         n_dispatched++;
-        RUU_tail = (RUU_tail + 1) % RUU_size;
-        RUU_num++;
+        curr_th->RUU_tail = (curr_th->RUU_tail + 1) % RUU_size;
+        curr_th->RUU_num++;
 
         /* issue op if all its reg operands are ready (no mem input) */
         if (OPERANDS_READY(rs))
@@ -4552,18 +4227,6 @@ ruu_dispatch(void)
         {
           /* could not issue this inst, stall issue until we can */
           RSLINK_INIT(last_op, rs);
-        }
-        
-        /* branch inst */
-        if (MD_OP_FLAGS(op) & F_CTRL)
-        {
-          fmt_dispatch_tail = (fmt_dispatch_tail + 1) % nfmt; // assume first fetch, first dispatch
-          fmt[fmt_dispatch_tail].ruu_id = rs - RUU;
-          curr_nfmt++;
-
-          sfmt_dispatch_tail = (sfmt_dispatch_tail + 1) % nsfmt; // assume first fetch, first dispatch
-          sfmt[sfmt_dispatch_tail].ruu_id = rs - RUU;
-          curr_nsfmt++;
         }
       }
     }
@@ -4593,31 +4256,31 @@ ruu_dispatch(void)
         if (pred && bpred_spec_update == spec_ID)
         {
           bpred_update(pred,
-              /* branch address */regs.regs_PC,
-              /* actual target address */regs.regs_NPC,
-              /* taken? */regs.regs_NPC != (regs.regs_PC +
+              /* branch address */curr_th->regs.regs_PC,
+              /* actual target address */curr_th->regs.regs_NPC,
+              /* taken? */curr_th->regs.regs_NPC != (curr_th->regs.regs_PC +
                 sizeof(md_inst_t)),
-              /* pred taken? */pred_PC != (regs.regs_PC +
+              /* pred taken? */curr_th->pred_PC != (curr_th->regs.regs_PC +
                 sizeof(md_inst_t)),
-              /* correct pred? */pred_PC == regs.regs_NPC,
+              /* correct pred? */curr_th->pred_PC == curr_th->regs.regs_NPC,
               /* opcode */op,
               /* predictor update ptr */&rs->dir_update);
         }
       }
 
       /* is the trace generator trasitioning into mis-speculation mode? */
-      if (pred_PC != regs.regs_NPC && !fetch_redirected)
+      if (curr_th->pred_PC != curr_th->regs.regs_NPC && !fetch_redirected)
       {
         /* entering mis-speculation mode, indicate this and save PC */
         spec_mode = TRUE;
         rs->recover_inst = TRUE;
-        recover_PC = regs.regs_NPC;
+        curr_th->recover_PC = curr_th->regs.regs_NPC;
       }
     }
 
     /* entered decode/allocate stage, indicate in pipe trace */
     ptrace_newstage(pseq, PST_DISPATCH,
-        (pred_PC != regs.regs_NPC) ? PEV_MPOCCURED : 0);
+        (curr_th->pred_PC != curr_th->regs.regs_NPC) ? PEV_MPOCCURED : 0);
     if (op == MD_NOP_OP)
     {
       /* end of the line */
@@ -4635,24 +4298,21 @@ ruu_dispatch(void)
       delta = newval - pcstat_lastvals[i];
       if (delta != 0)
       {
-        stat_add_samples(pcstat_sdists[i], regs.regs_PC, delta);
+        stat_add_samples(pcstat_sdists[i], curr_th->regs.regs_PC, delta);
         pcstat_lastvals[i] = newval;
       }
     }
 
     /* consume instruction from IFETCH -> DISPATCH queue */
-    fetch_head = (fetch_head+1) & (ruu_ifq_size - 1);
-    fetch_num--;
-    /* new inst enters the DISPATCH queue */
-    fmt_should_plus = 0;
-    sfmt_should_plus = 0;
+    curr_th->fetch_head = (curr_th->fetch_head+1) & (ruu_ifq_size - 1);
+    curr_th->fetch_num--;
 
     /* check for DLite debugger entry condition */
     made_check = TRUE;
-    if (dlite_check_break(pred_PC,
+    if (dlite_check_break(curr_th->pred_PC,
           is_write ? ACCESS_WRITE : ACCESS_READ,
           addr, sim_num_insn, sim_cycle))
-      dlite_main(regs.regs_PC, pred_PC, sim_cycle, &regs, mem);
+      dlite_main(curr_th->regs.regs_PC, curr_th->pred_PC, sim_cycle, &curr_th->regs, curr_th->mem);
   }
 
   /* need to enter DLite at least once per cycle */
@@ -4661,7 +4321,7 @@ ruu_dispatch(void)
     if (dlite_check_break(/* no next PC */0,
           is_write ? ACCESS_WRITE : ACCESS_READ,
           addr, sim_num_insn, sim_cycle))
-      dlite_main(regs.regs_PC, /* no next PC */0, sim_cycle, &regs, mem);
+      dlite_main(curr_th->regs.regs_PC, /* no next PC */0, sim_cycle, &curr_th->regs, curr_th->mem);
   }
 }
 
@@ -4675,13 +4335,17 @@ ruu_dispatch(void)
 fetch_init(void)
 {
   /* allocate the IFETCH -> DISPATCH instruction queue */
-  fetch_data =
-    (struct fetch_rec *)calloc(ruu_ifq_size, sizeof(struct fetch_rec));
-  if (!fetch_data)
-    fatal("out of virtual memory");
+  int th;
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    curr_th->fetch_data =
+      (struct fetch_rec *)calloc(ruu_ifq_size, sizeof(struct fetch_rec));
+    if (!curr_th->fetch_data)
+      fatal("out of virtual memory");
 
-  fetch_num = 0;
-  fetch_tail = fetch_head = 0;
+    curr_th->fetch_num = 0;
+    curr_th->fetch_tail = curr_th->fetch_head = 0;
+  }
   IFQ_count = 0;
   IFQ_fcount = 0;
 }
@@ -4691,36 +4355,65 @@ fetch_init(void)
 fetch_dump(FILE *stream)			/* output stream */
 {
   int num, head;
+  int th;
 
   if (!stream)
     stream = stderr;
+  
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    fprintf(stream, "** fetch stage state of thread %d **\n", th);
 
-  fprintf(stream, "** fetch stage state **\n");
+    fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
+    myfprintf(stream, "pred_PC: 0x%08p, recover_PC: 0x%08p\n",
+        curr_th->pred_PC, curr_th->recover_PC);
+    myfprintf(stream, "fetch_regs_PC: 0x%08p, fetch_pred_PC: 0x%08p\n",
+        curr_th->fetch_regs_PC, curr_th->fetch_pred_PC);
+    fprintf(stream, "\n");
 
-  fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
-  myfprintf(stream, "pred_PC: 0x%08p, recover_PC: 0x%08p\n",
-      pred_PC, recover_PC);
-  myfprintf(stream, "fetch_regs_PC: 0x%08p, fetch_pred_PC: 0x%08p\n",
-      fetch_regs_PC, fetch_pred_PC);
-  fprintf(stream, "\n");
+    fprintf(stream, "** fetch queue contents of thread %d **\n", th);
+    fprintf(stream, "fetch_num: %d\n", curr_th->fetch_num);
+    fprintf(stream, "fetch_head: %d, fetch_tail: %d\n",
+        curr_th->fetch_head, curr_th->fetch_tail);
 
-  fprintf(stream, "** fetch queue contents **\n");
-  fprintf(stream, "fetch_num: %d\n", fetch_num);
-  fprintf(stream, "fetch_head: %d, fetch_tail: %d\n",
-      fetch_head, fetch_tail);
-
-  num = fetch_num;
-  head = fetch_head;
-  while (num)
-  {
-    fprintf(stream, "idx: %2d: inst: `", head);
-    md_print_insn(fetch_data[head].IR, fetch_data[head].regs_PC, stream);
-    fprintf(stream, "'\n");
-    myfprintf(stream, "         regs_PC: 0x%08p, pred_PC: 0x%08p\n",
-        fetch_data[head].regs_PC, fetch_data[head].pred_PC);
-    head = (head + 1) & (ruu_ifq_size - 1);
-    num--;
+    num = curr_th->fetch_num;
+    head = curr_th->fetch_head;
+    while (num)
+    {
+      fprintf(stream, "idx: %2d: inst: `", head);
+      md_print_insn(curr_th->fetch_data[head].IR, curr_th->fetch_data[head].regs_PC, stream);
+      fprintf(stream, "'\n");
+      myfprintf(stream, "         regs_PC: 0x%08p, pred_PC: 0x%08p\n",
+          curr_th->fetch_data[head].regs_PC, curr_th->fetch_data[head].pred_PC);
+      head = (head + 1) & (ruu_ifq_size - 1);
+      num--;
+    }
   }
+}
+
+/* ICOUNT 2.8 scheduling policy: thread selection */
+/* find minimum ICOUNT thread among the threads of which ruu_fetch_issue_delay == 0 */
+static void 
+select_th(int *selected_th)
+{
+/* int selected_th[2] = {0, 0}; */
+  int min_icount[2] = {thread[0].icount, thread[0].icount};
+  int th, tmp_icount, tmp_th;
+
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    if (curr_th->icount < min_count[0]) {
+      min_count[1] = min_count[0];
+      selected_th[1] = selected_th[1];
+      min_count[0] = curr_th->icount;
+      selected_th[0] = th;
+    }
+    else if (curr_th->icount < min_icount[1]) {
+      min_icount[1] = curr_th->icount;
+      selected_th[1] = th;
+    }
+  }
+/* return selected_th; */
 }
 
 static int last_inst_missed = FALSE;
@@ -4731,34 +4424,48 @@ static int last_inst_tmissed = FALSE;
   static void
 ruu_fetch(void)
 {
-  int i, lat, tlb_lat, done = FALSE;
+  int i, lat, tlb_lat, done[16] = {FALSE};
   md_inst_t inst;
   int stack_recover_idx;
-  int branch_cnt;
+  int branch_cnt[16] = {0};
   counter_t il1_misses;
   counter_t il2_misses;
 /* counter_t itlb_misses; */
   enum md_opcode op;
+  int th_seq = 0;
+  int th_id;
+  int selected_th[2] = {0, 0};
 
-  for (i=0, branch_cnt=0;
+  /* ICOUNT 2.8 scheduling policy */
+  select_th(selected_th);
+
+  for (i=0;
       /* fetch up to as many instruction as the DISPATCH stage can decode */
       i < (ruu_decode_width * fetch_speed)
+      /* select two thread & fetch */
+      && th_seq < 2
       /* fetch until IFETCH -> DISPATCH queue fills */
-      && fetch_num < ruu_ifq_size
+      /* && fetch_num < ruu_ifq_size */
       /* and no IFETCH blocking condition encountered */
-      && !done;
+      /* && !done; */
       i++)
   {
+    th_id = selected_th[th_seq];
+    struct thread_t *curr_th = &(thread[th_id]);
+    if (curr_th->fetch_num >= ruu_ifq_size || done) {
+      th_seq++;
+      continue;
+    }
     /* fetch an instruction at the next predicted fetch address */
-    fetch_regs_PC = fetch_pred_PC;
+    curr_th->fetch_regs_PC = curr_th->fetch_pred_PC;
 
     /* is this a bogus text address? (can happen on mis-spec path) */
-    if (1 || ld_text_base <= fetch_regs_PC
-        && fetch_regs_PC < (ld_text_base+ld_text_size)
-        && !(fetch_regs_PC & (sizeof(md_inst_t)-1)))
+    if (1 || ld_text_base <= curr_th->fetch_regs_PC
+        && curr_th->fetch_regs_PC < (ld_text_base+ld_text_size)
+        && !(curr_th->fetch_regs_PC & (sizeof(md_inst_t)-1)))
     {
       /* read instruction from memory */
-      MD_FETCH_INST(inst, mem, fetch_regs_PC);
+      MD_FETCH_INST(inst, curr_th->mem, curr_th->fetch_regs_PC);
 
       /* address is within program text, read instruction from memory */
       lat = cache_il1_lat;
@@ -4768,27 +4475,12 @@ ruu_fetch(void)
         il1_misses = cache_il1->misses;
         il2_misses = cache_il2->misses;
         lat =
-          cache_access(cache_il1, Read, IACOMPRESS(fetch_regs_PC),
+          cache_access(cache_il1, Read, IACOMPRESS(curr_th->fetch_regs_PC),
               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
-              NULL, NULL);
-/* if (lat > cache_il1_lat) */
-/* last_inst_missed = TRUE; */
+              NULL, NULL, th_id);
         if (il1_misses < cache_il1->misses) {
           last_inst_missed = TRUE;
-          if (il2_misses < cache_il2->misses) {
-            // L2 I-cache miss
-            frontend_miss_flag = L2_CACHE_MISS;
-/* sfmt_frontend_miss_flag = L2_CACHE_MISS; */
-            naive_il2_miss_count++;
-          }
-          else {
-            frontend_miss_flag = L1_CACHE_MISS;
-/* sfmt_frontend_miss_flag = L1_CACHE_MISS; */
-            naive_il1_miss_count++;
-          }
         }
-/* else */
-/* frontend_miss_flag = CACHE_HIT; */
       }
 
       if (itlb)
@@ -4797,28 +4489,25 @@ ruu_fetch(void)
            speculative TLB misses */
         /* itlb_misses = itlb->misses; */
         tlb_lat =
-          cache_access(itlb, Read, IACOMPRESS(fetch_regs_PC),
+          cache_access(itlb, Read, IACOMPRESS(curr_th->fetch_regs_PC),
               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
-              NULL, NULL);
+              NULL, NULL, th_id);
         if (tlb_lat > 1) {
           last_inst_tmissed = TRUE;
-          frontend_miss_flag = TLB_MISS;
-/* sfmt_frontend_miss_flag = TLB_MISS; */
-          naive_itlb_miss_count++;
         }
-/* else */
-/* frontend_miss_flag = CACHE_HIT; */
 
         /* I-cache/I-TLB accesses occur in parallel */
         lat = MAX(tlb_lat, lat);
       }
 
-      /* I-cache/I-TLB miss */
       /* I-cache/I-TLB miss? assumes I-cache hit >= I-TLB hit */
       if (lat != cache_il1_lat)
       {
         /* I-cache miss, block fetch until it is resolved */
         ruu_fetch_issue_delay += lat - 1;
+        /* if I-cache miss, can next thread fetch?*/
+        /* th_seq++; */
+        /* continue; */
         break;
       }
       /* else, I-cache/I-TLB hit */
@@ -4841,71 +4530,52 @@ ruu_fetch(void)
          result for branches (assumes pre-decode bits); NOTE: returned
          value may be 1 if bpred can only predict a direction */
       if (MD_OP_FLAGS(op) & F_CTRL) {
-        fetch_pred_PC =
+        curr_th->fetch_pred_PC =
           bpred_lookup(pred,
-              /* branch address */fetch_regs_PC,
+              /* branch address */curr_th->fetch_regs_PC,
               /* target address *//* FIXME: not computed */0,
               /* opcode */op,
               /* call? */MD_IS_CALL(op),
               /* return? */MD_IS_RETURN(op),
-              /* updt */&(fetch_data[fetch_tail].dir_update),
+              /* updt */&(curr_th->fetch_data[curr_th->fetch_tail].dir_update),
               /* RSB index */&stack_recover_idx);
-
-        if (fmt_fetch == fmt_dispatch_head)
-          panic("FMT is full");
-        fmt_fetch = (fmt_fetch + 1) % nfmt;
-
-        fmt[fmt_fetch].ruu_id = 0;
-        fmt[fmt_fetch].mispred = 0;
-        fmt[fmt_fetch].bpenalty_count = 0;
-        fmt[fmt_fetch].local_il1_count = 0;
-        fmt[fmt_fetch].local_il2_count = 0;
-        fmt[fmt_fetch].local_itlb_count = 0;
-
-        sfmt_fetch = (sfmt_fetch + 1) % nsfmt;
-        if (sfmt_fetch == (sfmt_dispatch_head + 1) % nsfmt)
-          panic("sFMT is full");
-
-        sfmt[sfmt_fetch].ruu_id = 0;
-        sfmt[sfmt_fetch].mispred = 0;
-        sfmt[sfmt_fetch].bpenalty_count = 0;
       }
       else
-        fetch_pred_PC = 0;
+        curr_th->fetch_pred_PC = 0;
 
       /* valid address returned from branch predictor? */
-      if (!fetch_pred_PC)
+      if (!curr_th->fetch_pred_PC)
       {
         /* no predicted taken target, attempt not taken target */
-        fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
+        curr_th->fetch_pred_PC = curr_th->fetch_regs_PC + sizeof(md_inst_t);
       }
       else
       {
         /* go with target, NOTE: discontinuous fetch, so terminate */
-        branch_cnt++;
-        if (branch_cnt >= fetch_speed)
-          done = TRUE;
+        branch_cnt[th_id]++;
+        if (branch_cnt[th_id] >= fetch_speed)
+          done[th_id] = TRUE;
       }
     }
     else
     {
       /* no predictor, just default to predict not taken, and
          continue fetching instructions linearly */
-      fetch_pred_PC = fetch_regs_PC + sizeof(md_inst_t);
+      curr_th->fetch_pred_PC = curr_th->fetch_regs_PC + sizeof(md_inst_t);
     }
 
     /* commit this instruction to the IFETCH -> DISPATCH queue */
-    fetch_data[fetch_tail].IR = inst;
-    fetch_data[fetch_tail].regs_PC = fetch_regs_PC;
-    fetch_data[fetch_tail].pred_PC = fetch_pred_PC;
-    fetch_data[fetch_tail].stack_recover_idx = stack_recover_idx;
-    fetch_data[fetch_tail].ptrace_seq = ptrace_seq++;
+    curr_th->fetch_data[curr_th->fetch_tail].IR = inst;
+    curr_th->fetch_data[curr_th->fetch_tail].regs_PC = curr_th->fetch_regs_PC;
+    curr_th->fetch_data[curr_th->fetch_tail].pred_PC = curr_th->fetch_pred_PC;
+    curr_th->fetch_data[curr_th->fetch_tail].stack_recover_idx = stack_recover_idx;
+    curr_th->fetch_data[curr_th->fetch_tail].ptrace_seq = ptrace_seq++;
 
     /* for pipe trace */
-    ptrace_newinst(fetch_data[fetch_tail].ptrace_seq,
-        inst, fetch_data[fetch_tail].regs_PC,
+    ptrace_newinst(curr_th->fetch_data[curr_th->fetch_tail].ptrace_seq,
+        inst, curr_th->fetch_data[curr_th->fetch_tail].regs_PC,
         0);
-    ptrace_newstage(fetch_data[fetch_tail].ptrace_seq,
+    ptrace_newstage(curr_th->fetch_data[curr_th->fetch_tail].ptrace_seq,
         PST_IFETCH,
         ((last_inst_missed ? PEV_CACHEMISS : 0)
          | (last_inst_tmissed ? PEV_TLBMISS : 0)));
@@ -4916,8 +4586,8 @@ ruu_fetch(void)
     if (MD_OP_FLAGS(op) & F_MEM) ptrace_seq++;
 
     /* adjust instruction fetch queue */
-    fetch_tail = (fetch_tail + 1) & (ruu_ifq_size - 1);
-    fetch_num++;
+    curr_th->fetch_tail = (curr_th->fetch_tail + 1) & (ruu_ifq_size - 1);
+    curr_th->fetch_num++;
   }
 }
 
@@ -5012,16 +4682,21 @@ sim_main(void)
   signal(SIGFPE, SIG_IGN);
 
   /* set up program entry state */
-  regs.regs_PC = ld_prog_entry;
-  regs.regs_NPC = regs.regs_PC + sizeof(md_inst_t);
+  int th;
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    curr_th->regs.regs_PC = ld_prog_entry;
+    curr_th->regs.regs_NPC = curr_th->regs.regs_PC + sizeof(md_inst_t);
 
-  /* check for DLite debugger entry condition */
-  if (dlite_check_break(regs.regs_PC, /* no access */0, /* addr */0, 0, 0))
-    dlite_main(regs.regs_PC, regs.regs_PC + sizeof(md_inst_t),
-        sim_cycle, &regs, mem);
+    /* check for DLite debugger entry condition */
+    if (dlite_check_break(curr_th->regs.regs_PC, /* no access */0, /* addr */0, 0, 0))
+      dlite_main(curr_th->regs.regs_PC, curr_th->regs.regs_PC + sizeof(md_inst_t),
+          sim_cycle, &curr_th->regs, curr_th->mem);
+  }
 
   /* fast forward simulator loop, performs functional simulation for
      FASTFWD_COUNT insts, then turns on performance (timing) simulation */
+  /* fast forward equally for each thread (fastfwd_count / nthread) */
   if (fastfwd_count > 0)
   {
     int icount;
@@ -5038,76 +4713,82 @@ sim_main(void)
 #endif /* HOST_HAS_QWORD */
     enum md_fault_type fault;
 
-    fprintf(stderr, "sim: ** fast forwarding %d insts **\n", fastfwd_count);
+    for (th=0; th<nthread; ++th) {
+      struct thread_t *curr_th = &(thread[th]);
+      fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count/nthread, th);
 
-    for (icount=0; icount < fastfwd_count; icount++)
-    {
-      /* maintain $r0 semantics */
-      regs.regs_R[MD_REG_ZERO] = 0;
+      for (icount=0; icount < fastfwd_count/nthread; icount++)
+      {
+        /* maintain $r0 semantics */
+        curr_th->regs.regs_R[MD_REG_ZERO] = 0;
 #ifdef TARGET_ALPHA
-      regs.regs_F.d[MD_REG_ZERO] = 0.0;
+        curr_th->regs.regs_F.d[MD_REG_ZERO] = 0.0;
 #endif /* TARGET_ALPHA */
 
-      /* get the next instruction to execute */
-      MD_FETCH_INST(inst, mem, regs.regs_PC);
+        /* get the next instruction to execute */
+        MD_FETCH_INST(inst, curr_th->mem, curr_th->regs.regs_PC);
 
-      /* set default reference address */
-      addr = 0; is_write = FALSE;
+        /* set default reference address */
+        addr = 0; is_write = FALSE;
 
-      /* set default fault - none */
-      fault = md_fault_none;
+        /* set default fault - none */
+        fault = md_fault_none;
 
-      /* decode the instruction */
-      MD_SET_OPCODE(op, inst);
+        /* decode the instruction */
+        MD_SET_OPCODE(op, inst);
 
-      /* execute the instruction */
-/* fprintf(stderr, "inst: %d\n", op); */
-      switch (op)
-      {
+        /* execute the instruction */
+        /* fprintf(stderr, "inst: %d\n", op); */
+        switch (op)
+        {
 #define DEFINST(OP,MSK,NAME,OPFORM,RES,FLAGS,O1,O2,I1,I2,I3)		\
-        case OP:							\
-                              SYMCAT(OP,_IMPL);						\
-        break;
+          case OP:							\
+                                SYMCAT(OP,_IMPL);						\
+          break;
 #define DEFLINK(OP,MSK,NAME,MASK,SHIFT)					\
-        case OP:							\
-                              panic("attempted to execute a linking opcode");
+          case OP:							\
+                                panic("attempted to execute a linking opcode");
 #define CONNECT(OP)
 #undef DECLARE_FAULT
 #define DECLARE_FAULT(FAULT)						\
-        { fault = (FAULT); break; }
+          { fault = (FAULT); break; }
 #include "machine.def"
-        default:
-          panic("attempted to execute a bogus opcode");
+          default:
+            panic("attempted to execute a bogus opcode");
+        }
+
+        if (fault != md_fault_none)
+          fatal("fault (%d) detected @ 0x%08p", fault, curr_th->regs.regs_PC);
+
+        /* update memory access stats */
+        if (MD_OP_FLAGS(op) & F_MEM)
+        {
+          if (MD_OP_FLAGS(op) & F_STORE)
+            is_write = TRUE;
+        }
+
+        /* check for DLite debugger entry condition */
+        if (dlite_check_break(curr_th->regs.regs_NPC,
+              is_write ? ACCESS_WRITE : ACCESS_READ,
+              addr, sim_num_insn, sim_num_insn))
+          dlite_main(curr_th->regs.regs_PC, curr_th->regs.regs_NPC, sim_num_insn, &curr_th->regs, curr_th->mem);
+
+        /* go to the next instruction */
+        curr_th->regs.regs_PC = curr_th->regs.regs_NPC;
+        curr_th->regs.regs_NPC += sizeof(md_inst_t);
       }
-
-      if (fault != md_fault_none)
-        fatal("fault (%d) detected @ 0x%08p", fault, regs.regs_PC);
-
-      /* update memory access stats */
-      if (MD_OP_FLAGS(op) & F_MEM)
-      {
-        if (MD_OP_FLAGS(op) & F_STORE)
-          is_write = TRUE;
-      }
-
-      /* check for DLite debugger entry condition */
-      if (dlite_check_break(regs.regs_NPC,
-            is_write ? ACCESS_WRITE : ACCESS_READ,
-            addr, sim_num_insn, sim_num_insn))
-        dlite_main(regs.regs_PC, regs.regs_NPC, sim_num_insn, &regs, mem);
-
-      /* go to the next instruction */
-      regs.regs_PC = regs.regs_NPC;
-      regs.regs_NPC += sizeof(md_inst_t);
     }
   }
 
   fprintf(stderr, "sim: ** starting performance simulation **\n");
 
   /* set up timing simulation entry state */
-  fetch_regs_PC = regs.regs_PC - sizeof(md_inst_t);
-  fetch_pred_PC = regs.regs_PC;
-  regs.regs_PC = regs.regs_PC - sizeof(md_inst_t);
+  for (th=0; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    curr_th->fetch_regs_PC = curr_th->regs.regs_PC - sizeof(md_inst_t);
+    curr_th->fetch_pred_PC = curr_th->regs.regs_PC;
+    curr_th->regs.regs_PC = curr_th->regs.regs_PC - sizeof(md_inst_t);
+  }
 
   /* main simulator loop, NOTE: the pipe stages are traverse in reverse order
      to eliminate this/next state synchronization and relaxation problems */
@@ -5166,95 +4847,13 @@ sim_main(void)
     }
 
     /* call instruction fetch unit if it is not blocked */
+    /* FIXME : should consider ruu_fetch_issue_delay of each thread */
     if (!ruu_fetch_issue_delay) {
-      frontend_miss_flag = CACHE_HIT;
       ruu_fetch();
     }
     else {
       ruu_fetch_issue_delay--;
     }
-
-    /* if fetch is successfully done, it should be CACHE_HIT */
-    if (frontend_miss_flag & TLB_MISS) {
-      fmt[fmt_fetch].local_itlb_count++;
-      sfmt_local_itlb_count++;
-    }
-    else if (frontend_miss_flag & L2_CACHE_MISS) {
-      fmt[fmt_fetch].local_il2_count++;
-      sfmt_local_il2_count++;
-    }
-    else if (frontend_miss_flag & L1_CACHE_MISS) {
-      fmt[fmt_fetch].local_il1_count++;
-      sfmt_local_il1_count++;
-    }
-
-    /* branch miss penalty */
-    if (sim_num_insn > warmup_count) {
-      if (fmt_should_plus) {
-        fmt_bpenalty_count++;
-      }
-      if (sfmt_should_plus) {
-        sfmt_bpenalty_count++;
-      }
-    }
-
-    /* long backend misses or long latency misses of RUU head */
-/* if (RUU_num == RUU_size) { */
-/* if (backend_miss_flag & TLB_MISS) { */
-/* fmt_dtlb_miss_count++; */
-/* sfmt_dtlb_miss_count++; */
-/* } */
-/* else if (backend_miss_flag & L2_CACHE_MISS) { */
-/* fmt_dl1_miss_count++; */
-/* sfmt_dl1_miss_count++; */
-/* } */
-/* else if (backend_miss_flag & L1_CACHE_MISS) { */
-/* fmt_dl2_miss_count++; */
-/* sfmt_dl2_miss_count++; */
-/* } */
-/* else { */
-/* fmt_funct_stall_count++; */
-/* sfmt_funct_stall_count++; */
-/* } */
-/* } */
-    if (RUU_num == RUU_size) {
-      if (sim_num_insn > warmup_count) {
-        struct RUU_station *rs = &(RUU[RUU_head]);
-        if (rs->backend_miss_flag & TLB_MISS) {
-          fmt_dtlb_miss_count++;
-          sfmt_dtlb_miss_count++;
-        }
-        else if (rs->backend_miss_flag & L2_CACHE_MISS) {
-          fmt_dl1_miss_count++;
-          sfmt_dl1_miss_count++;
-        }
-        else if (rs->backend_miss_flag & L1_CACHE_MISS) {
-          fmt_dl2_miss_count++;
-          sfmt_dl2_miss_count++;
-        }
-        else {
-          fmt_funct_stall_count++;
-          sfmt_funct_stall_count++;
-        }
-      }
-    }
-    else if (curr_nfmt > 0){ /* if RUU is not full, increment branch counters in RUU */
-      int i = (fmt_dispatch_head + 1) % nfmt;
-      for (;;) {
-        fmt[i].bpenalty_count++;
-        if (i == fmt_dispatch_tail) break;
-        else i = (i+1)%nfmt;
-      }
-      i = (sfmt_dispatch_head + 1) % nsfmt;
-      for (;;) {
-        sfmt[i].bpenalty_count++;
-        if (i == sfmt_dispatch_tail) break;
-        else i = (i+1)%nsfmt;
-      }
-    }
-
-/* if (RUU_num < RUU_size) */
-/* backend_miss_flag = CACHE_HIT; */
 
     /* update buffer occupancy stats */
     IFQ_count += fetch_num;
@@ -5271,7 +4870,6 @@ sim_main(void)
     if (max_insts && sim_num_insn >= max_insts)
       return;
     if (program_complete) {
-      cpi_stack = fmt_il1_miss_count + fmt_il2_miss_count + fmt_itlb_miss_count + fmt_dl1_miss_count + fmt_dl2_miss_count + fmt_dtlb_miss_count + fmt_bpenalty_count + fmt_funct_stall_count;
       return;
     }
   }

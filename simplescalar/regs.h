@@ -103,7 +103,7 @@ struct regs_t {
   md_ctrl_t regs_C;		/* control register file */
   md_addr_t regs_PC;		/* program counter */
   md_addr_t regs_NPC;		/* next-cycle program counter */
-  int thread_id;
+  int thread_id; /* thread ID of register file */
 };
 
 /* create a register file */

@@ -81,6 +81,7 @@ struct mem_t {
   counter_t page_count;			/* total number of pages allocated */
   counter_t ptab_misses;		/* total first level page tbl misses */
   counter_t ptab_accesses;		/* total page table accesses */
+  int thread_id;            /* thread ID of this memory space*/
 };
 
 /* memory access command */

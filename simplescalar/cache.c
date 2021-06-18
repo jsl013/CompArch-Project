@@ -268,10 +268,9 @@ cache_create(char *name,		/* name of the cache */
     unsigned int (*blk_access_fn)(enum mem_cmd cmd,
       md_addr_t baddr, int bsize,
       struct cache_blk_t *blk,
-      tick_t now),
-    unsigned int hit_latency,	/* latency in cycles for a hit */
-    int nmshr, /* number of MSHR entries */ 
-    int mshr_nmisses)	/* maximum misses per MSHR */
+      tick_t now,
+      int thread_id),
+    unsigned int hit_latency)	/* latency in cycles for a hit */
 {
   struct cache_t *cp;
   struct cache_blk_t *blk;
@@ -295,10 +294,6 @@ cache_create(char *name,		/* name of the cache */
     fatal("cache associativity `%d' must be a power of two", assoc);
   if (!blk_access_fn)
     fatal("must specify miss/replacement functions");
-  if (nmshr < 0)
-    fatal("MSHR entry size `%d' must be zero or positive", nmshr);
-  if (mshr_nmisses < 0)
-    fatal("MSHR maximum misses per entry `%d' must be zero or positive", mshr_nmisses);
 
   /* allocate the cache structure */
   cp = (struct cache_t *)
@@ -315,15 +310,6 @@ cache_create(char *name,		/* name of the cache */
   cp->assoc = assoc;
   cp->policy = policy;
   cp->hit_latency = hit_latency;
-
-  cp->nmshr = nmshr;
-  cp->mshr = (struct mshr_t *) calloc(nmshr, sizeof(struct mshr_t));
-  cp->mshr_nalloc = 0;
-  cp->mshr_nmisses = mshr_nmisses;
-  for (i=0; i<nmshr; i++) {
-    cp->mshr[i].bvalid = 0;
-    cp->mshr[i].nalloc = 0;
-  }
 
   /* miss/replacement functions */
   cp->blk_access_fn = blk_access_fn;
@@ -518,17 +504,14 @@ cache_access(struct cache_t *cp,	/* cache to access */
     int nbytes,		/* number of bytes to access */
     tick_t now,		/* time of access */
     byte_t **udata,		/* for return of user data ptr */
-    md_addr_t *repl_addr)	/* for address of replaced block */
+    md_addr_t *repl_addr,	/* for address of replaced block */
+    int thread_id) /* thread ID of address space */
 {
   byte_t *p = vp;
   md_addr_t tag = CACHE_TAG(cp, addr);
   md_addr_t set = CACHE_SET(cp, addr);
-  md_addr_t tagset = CACHE_TAGSET(cp, addr);
   md_addr_t bofs = CACHE_BLK(cp, addr);
   struct cache_blk_t *blk, *repl;
-  struct mshr_t *curr_mshr;
-  struct mshr_t *target_mshr = NULL;
-  int i = 0;
   int lat = 0;
 
   /* default replacement address */
@@ -548,13 +531,10 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* permissions are checked on cache misses */
 
   /* check for a fast hit: access to same block */
-  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->ready <= now))
+  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->thread_id == thread_id))
   {
-    if (cp->last_blk->ready <= now) {
-      /* hit in the same block */
       blk = cp->last_blk;
       goto cache_fast_hit;
-    }
   }
 
   if (cp->hsize)
@@ -566,7 +546,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->hash_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->thread_id == thread_id))
         goto cache_hit;
     }
   }
@@ -577,7 +557,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->way_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->thread_id == thread_id))
         goto cache_hit;
     }
   }
@@ -586,34 +566,6 @@ cache_access(struct cache_t *cp,	/* cache to access */
 
   /* **MISS** */
   cp->misses++;
-  
-  if (cp->nmshr) {
-    for (i=0; i<cp->nmshr; i++) {
-      curr_mshr = &(cp->mshr[i]);
-      if (curr_mshr->bvalid && curr_mshr->baddr == tagset) {
-        goto mshr_hit;
-      }
-      else if (curr_mshr->bvalid && curr_mshr->t_return <= now) {
-        curr_mshr->bvalid = 0;
-        cp->mshr_nalloc = 0;
-      }
-      else if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
-        target_mshr = curr_mshr;
-      }
-    }
-
-    /* primary miss*/
-    if (target_mshr != NULL) {
-      target_mshr->bvalid = 1; // bvalid init! cache_create
-      target_mshr->baddr = tagset;
-      target_mshr->nalloc = 1;
-      cp->mshr_nalloc++;
-    }
-    else { /* structural-stall miss */
-      lat = CACHE_BLKED;
-      return lat;
-    }
-  }
 
   /* select the appropriate block to replace, and re-link this entry to
      the appropriate place in the way list */
@@ -664,17 +616,18 @@ cache_access(struct cache_t *cp,	/* cache to access */
       cp->writebacks++;
       lat += cp->blk_access_fn(Write,
           CACHE_MK_BADDR(cp, repl->tag, set),
-          cp->bsize, repl, now+lat);
+          cp->bsize, repl, now+lat, thread_id);
     }
   }
 
-  /* update block tags */
+  /* update block tags & thread id */
   repl->tag = tag;
   repl->status = CACHE_BLK_VALID;	/* dirty bit set on update */
+  repl->thread_id = thread_id;
 
   /* read data block */
   lat += cp->blk_access_fn(Read, CACHE_BADDR(cp, addr), cp->bsize,
-      repl, now+lat);
+      repl, now+lat, thread_id);
 
   /* copy data out of cache block */
   if (cp->balloc)
@@ -696,10 +649,6 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* link this entry back into the hash table */
   if (cp->hsize)
     link_htab_ent(cp, &cp->sets[set], repl);
-
-  if (cp->nmshr) {
-    target_mshr->t_return = now + lat;
-  }
 
   /* return latency of the operation */
   return lat;
@@ -769,17 +718,6 @@ cache_fast_hit: /* fast hit handler */
 
   /* return first cycle data is available to access */
   return (int) MAX(cp->hit_latency, (blk->ready - now));
-  
-mshr_hit:
-  /* secondary miss */
-  if (curr_mshr->nalloc < cp->mshr_nmisses) {
-    curr_mshr->nalloc++;
-    lat = BOUND_POS(curr_mshr->t_return - now);
-  }
-  else { /* structural-stall miss */
-    lat = CACHE_BLKED;
-  }
-  return lat;
 }
 
 /* return non-zero if block containing address ADDR is contained in cache
@@ -852,7 +790,7 @@ cache_flush(struct cache_t *cp,		/* cache instance to flush */
           cp->writebacks++;
           lat += cp->blk_access_fn(Write,
               CACHE_MK_BADDR(cp, blk->tag, i),
-              cp->bsize, blk, now+lat);
+              cp->bsize, blk, now+lat, blk->thread_id);
         }
       }
     }
@@ -914,7 +852,7 @@ cache_flush_addr(struct cache_t *cp,	/* cache instance to flush */
       cp->writebacks++;
       lat += cp->blk_access_fn(Write,
           CACHE_MK_BADDR(cp, blk->tag, set),
-          cp->bsize, blk, now+lat);
+          cp->bsize, blk, now+lat, blk->thread_id);
     }
     /* move this block to tail of the way (LRU) list */
     update_way_list(&cp->sets[set], blk, Tail);

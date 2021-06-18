@@ -134,6 +134,7 @@ struct cache_blk_t
      defined in this structure! */
   byte_t data[1];		/* actual data block starts here, block size
 				   should probably be a multiple of 8 */
+  int thread_id; /* thread ID of cache block */
 };
 
 /* cache set definition (one or more blocks sharing the same set index) */
@@ -189,7 +190,8 @@ struct cache_t
 		     md_addr_t baddr,		/* program address to access */
 		     int bsize,			/* size of the cache block */
 		     struct cache_blk_t *blk,	/* ptr to cache block struct */
-		     tick_t now);		/* when fetch was initiated */
+		     tick_t now,		/* when fetch was initiated */
+         int thread_id);
 
   /* derived data, for fast decoding */
   int hsize;			/* cache set hash table size */
@@ -242,10 +244,9 @@ cache_create(char *name,		/* name of the cache */
 	     unsigned int (*blk_access_fn)(enum mem_cmd cmd,
 					   md_addr_t baddr, int bsize,
 					   struct cache_blk_t *blk,
-					   tick_t now),
-	     unsigned int hit_latency, /* latency in cycles for a hit */
-       int nmshr, /* total number of MSHR */
-       int mshr_nmisses); /* maximum misses per MSHR */ 
+					   tick_t now,
+             int thread_id),
+	     unsigned int hit_latency); /* latency in cycles for a hit */
 
 /* parse policy */
 enum cache_policy			/* replacement policy enum */
@@ -282,7 +283,8 @@ cache_access(struct cache_t *cp,	/* cache to access */
 	     int nbytes,		/* number of bytes to access */
 	     tick_t now,		/* time of access */
 	     byte_t **udata,		/* for return of user data ptr */
-	     md_addr_t *repl_addr);	/* for address of replaced block */
+	     md_addr_t *repl_addr,	/* for address of replaced block */
+       int thread_id);  /* thread ID of address space */
 
 /* cache access functions, these are safe, they check alignment and
    permissions */
