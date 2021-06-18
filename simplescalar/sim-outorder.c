@@ -1516,6 +1516,26 @@ simoo_mstate_obj(FILE *stream,			/* output stream */
 /* total RS links allocated at program start */
 #define MAX_RS_LINKS                    4096
 
+static int*
+find_th_argv(int argc, char **argv) {
+  int *th_argc = calloc(nthread, sizeof(int));
+  int tmp_th_argc = 0, th = 0;
+  int i = 0; 
+  int cmp;
+  for (i=0; i<argc; ++i) {
+    cmp = strcmp(argv[i], "+");
+    if (cmp == 0) {
+      th_argc[th] = tmp_th_argc;
+      th++;
+      tmp_th_argc = 0;
+    }
+    else
+      tmp_th_argc++;
+  }
+  th_argc[nthread-1] = tmp_th_argc;
+  return th_argc;
+}
+
 /* load program into simulated state */
   void
 sim_load_prog(char *fname,		/* program to load */
@@ -1524,8 +1544,13 @@ sim_load_prog(char *fname,		/* program to load */
 {
   int th;
   /* load program text and data, set up environment, memory, and regs */
+  int *th_argc = find_th_argv(argc, argv);
+  int argv_start = 0;
+
   for (th=0; th<nthread; ++th) {
-    ld_load_prog(fname, argc, argv, envp, &(thread[th].regs), thread[th].mem, TRUE);
+    struct thread_t *curr_th = &(thread[th]);
+    ld_load_prog(fname, th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE);
+    argv_start += th_argc[th]+1;
   }
 
   /* initialize here, so symbols can be loaded */
@@ -2185,20 +2210,20 @@ static struct CV_link CVLINK_NULL = { NULL, 0 };
 /* static tick_t spec_create_vector_rt[MD_TOTAL_REGS]; */
 
 /* read a create vector entry */
-#define CREATE_VECTOR(N)        (BITMAP_SET_P(use_spec_cv, CV_BMAP_SZ, (N))\
-    ? spec_create_vector[N]                \
-    : create_vector[N])
+#define CREATE_VECTOR(N)        (BITMAP_SET_P(curr_th->use_spec_cv, CV_BMAP_SZ, (N))\
+    ? curr_th->spec_create_vector[N]                \
+    : curr_th->create_vector[N])
 
 /* read a create vector timestamp entry */
-#define CREATE_VECTOR_RT(N)     (BITMAP_SET_P(use_spec_cv, CV_BMAP_SZ, (N))\
-    ? spec_create_vector_rt[N]             \
-    : create_vector_rt[N])
+#define CREATE_VECTOR_RT(N)     (BITMAP_SET_P(curr_th->use_spec_cv, CV_BMAP_SZ, (N))\
+    ? curr_th->spec_create_vector_rt[N]             \
+    : curr_th->create_vector_rt[N])
 
 /* set a create vector entry */
 #define SET_CREATE_VECTOR(N, L) (spec_mode                              \
-    ? (BITMAP_SET(use_spec_cv, CV_BMAP_SZ, (N)),\
-      spec_create_vector[N] = (L))        \
-      : (create_vector[N] = (L)))
+    ? (BITMAP_SET(curr_th->use_spec_cv, CV_BMAP_SZ, (N)),\
+      curr_th->spec_create_vector[N] = (L))        \
+      : (curr_th->create_vector[N] = (L)))
 
 /* initialize the create vector */
   static void
@@ -2231,6 +2256,7 @@ cv_dump(FILE *stream)				/* output stream */
 {
   int i;
   struct CV_link ent;
+  struct thread_t *curr_th = &(thread[0]);
 
   if (!stream)
     stream = stderr;
@@ -2525,11 +2551,11 @@ ruu_writeback(void)
 {
   int i;
   struct RUU_station *rs;
-  struct thread_t *curr_th = &(thread[rs->thread_id]);
 
   /* service all completed events */
   while ((rs = eventq_next_event()))
   {
+    struct thread_t *curr_th = &(thread[rs->thread_id]);
     /* RS has completed execution and (possibly) produced a result */
     if (!OPERANDS_READY(rs) || rs->queued || !rs->issued || rs->completed)
       panic("inst completed and !ready, !issued, or completed");
@@ -2545,12 +2571,12 @@ ruu_writeback(void)
 
       /* recover processor state and reinit fetch to correct path */
       ruu_recover(rs->thread_id, rs - curr_th->RUU);
-      tracer_recover();
+      tracer_recover(rs->thread_id);
       bpred_recover(pred, rs->PC, rs->stack_recover_idx);
       recovery_count++;
 
       /* stall fetch until I-fetch and I-decode recover */
-      ruu_fetch_issue_delay += ruu_branch_penalty;
+      curr_th->ruu_fetch_issue_delay += ruu_branch_penalty;
 
       /* continue writeback of the branch/control instruction */
     }
@@ -3699,8 +3725,8 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define __READ_SPECMEM(SRC, SRC_V, FAULT)				\
   (addr = (SRC),							\
    (spec_mode								\
-    ? ((FAULT) = spec_mem_access(mem, Read, addr, &SRC_V, sizeof(SRC_V)))\
-    : ((FAULT) = mem_access(mem, Read, addr, &SRC_V, sizeof(SRC_V)))),	\
+    ? ((FAULT) = spec_mem_access(curr_th->mem, Read, addr, &SRC_V, sizeof(SRC_V)))\
+    : ((FAULT) = mem_access(curr_th->mem, Read, addr, &SRC_V, sizeof(SRC_V)))),	\
     SRC_V)
 
 #define READ_BYTE(SRC, FAULT)						\
@@ -3718,8 +3744,8 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define __WRITE_SPECMEM(SRC, DST, DST_V, FAULT)				\
   (DST_V = (SRC), addr = (DST),						\
    (spec_mode								\
-    ? ((FAULT) = spec_mem_access(mem, Write, addr, &DST_V, sizeof(DST_V)))\
-    : ((FAULT) = mem_access(mem, Write, addr, &DST_V, sizeof(DST_V)))))
+    ? ((FAULT) = spec_mem_access(curr_th->mem, Write, addr, &DST_V, sizeof(DST_V)))\
+    : ((FAULT) = mem_access(curr_th->mem, Write, addr, &DST_V, sizeof(DST_V)))))
 
 #define WRITE_BYTE(SRC, DST, FAULT)					\
   __WRITE_SPECMEM((SRC), (DST), temp_byte, (FAULT))
@@ -3736,7 +3762,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define SYSCALL(INST)							\
   (/* only execute system calls in non-speculative mode */		\
    (spec_mode ? panic("speculative syscall") : (void) 0),		\
-   sys_syscall(&regs, mem_access, mem, INST, TRUE))
+   sys_syscall(&curr_th->regs, mem_access, curr_th->mem, INST, TRUE))
 
 /* default register state accessor, used by DLite */
   static char *					/* err str, NULL for no err */
@@ -3890,26 +3916,29 @@ ruu_dispatch(void)
   qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
   enum md_fault_type fault;
-  int th_id = 0;
+  static int th_id = 0;
+  int try_th = 0;
+  struct thread_t *curr_th = &(thread[th_id]);
 
   made_check = FALSE;
   n_dispatched = 0;
   while (/* instruction decode B/W left? */
       n_dispatched < (ruu_decode_width * fetch_speed)
       /* all threads done? */
-      && th_id < nthread
+      && try_th < nthread
       /* on an acceptable trace path */
       && (ruu_include_spec || !spec_mode))
   {
-    struct thread_t *curr_th = &(thread[th_id]);
+    curr_th = &(thread[th_id]);
 
-      if (/* RUU and LSQ not full? */
-      curr_th->RUU_num >= RUU_size || curr_th->LSQ_num >= LSQ_size
-      /* insts still available from fetch unit? */
-      || curr_th->fetch_num == 0) {
-        th_id++;
-        continue;
-      }
+    if (/* RUU and LSQ not full? */
+        curr_th->RUU_num >= RUU_size || curr_th->LSQ_num >= LSQ_size
+        /* insts still available from fetch unit? */
+        || curr_th->fetch_num == 0) {
+      th_id = (th_id + 1) % nthread;
+      try_th++;
+      continue;
+    }
 
     /* if issuing in-order, block until last op issues if inorder issue */
     if (ruu_inorder_issue
@@ -4013,7 +4042,7 @@ ruu_dispatch(void)
     if (!spec_mode && verbose)
     {
       myfprintf(stderr, "++ %10n [xor: 0x%08x] {%d} @ 0x%08p: ",
-          sim_num_insn, md_xor_regs(&regs),
+          sim_num_insn, md_xor_regs(&curr_th->regs),
           inst_seq+1, curr_th->regs.regs_PC);
       md_print_insn(inst, curr_th->regs.regs_PC, stderr);
       fprintf(stderr, "\n");
@@ -4064,7 +4093,7 @@ ruu_dispatch(void)
       recovery_count++;
 
       curr_th->fetch_head = (ruu_ifq_size-1);
-      curr_th->icount -= curr_th->fetech_num - 1;
+      curr_th->icount -= curr_th->fetch_num - 1;
       curr_th->fetch_num = 1;
       curr_th->fetch_tail = 0;
       curr_th->ruu_fetch_issue_delay += ruu_branch_penalty;
@@ -4181,6 +4210,7 @@ ruu_dispatch(void)
         curr_th->RUU_num++;
         curr_th->LSQ_tail = (curr_th->LSQ_tail + 1) % LSQ_size;
         curr_th->LSQ_num++;
+        curr_th->icount--;
 
         if (OPERANDS_READY(rs))
         {
@@ -4214,6 +4244,7 @@ ruu_dispatch(void)
         n_dispatched++;
         curr_th->RUU_tail = (curr_th->RUU_tail + 1) % RUU_size;
         curr_th->RUU_num++;
+        curr_th->icount--;
 
         /* issue op if all its reg operands are ready (no mem input) */
         if (OPERANDS_READY(rs))
@@ -4234,6 +4265,7 @@ ruu_dispatch(void)
     {
       /* this is a NOP, no need to update RUU/LSQ state */
       rs = NULL;
+      curr_th->icount--;
     }
 
     /* one more instruction executed, speculative or otherwise */
@@ -4323,6 +4355,8 @@ ruu_dispatch(void)
           addr, sim_num_insn, sim_cycle))
       dlite_main(curr_th->regs.regs_PC, /* no next PC */0, sim_cycle, &curr_th->regs, curr_th->mem);
   }
+
+  th_id = (th_id + 1) % nthread;
 }
 
 
@@ -4393,26 +4427,33 @@ fetch_dump(FILE *stream)			/* output stream */
 
 /* ICOUNT 2.8 scheduling policy: thread selection */
 /* find minimum ICOUNT thread among the threads of which ruu_fetch_issue_delay == 0 */
+/* priority : threads whose frontend misses are resolved */
 static void 
 select_th(int *selected_th)
 {
 /* int selected_th[2] = {0, 0}; */
   int min_icount[2] = {thread[0].icount, thread[0].icount};
-  int th, tmp_icount, tmp_th;
+  int th;
+  int n_select = 0;
 
-  for (th=0; th<nthread; ++th) {
+  for (th=1; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-    if (curr_th->icount < min_count[0]) {
-      min_count[1] = min_count[0];
+/* if (curr_th->ruu_fetch_issue_delay) continue; */
+    if (curr_th->icount < min_icount[0]) {
+      min_icount[1] = min_icount[0];
       selected_th[1] = selected_th[1];
-      min_count[0] = curr_th->icount;
+      min_icount[0] = curr_th->icount;
       selected_th[0] = th;
+      n_select++;
     }
     else if (curr_th->icount < min_icount[1]) {
       min_icount[1] = curr_th->icount;
       selected_th[1] = th;
+      n_select++;
     }
   }
+/* if (n_select < 2) */
+/* panic("There is not enough thread to fetch due to I-cache/I-TLB miss"); */
 /* return selected_th; */
 }
 
@@ -4443,7 +4484,7 @@ ruu_fetch(void)
       /* fetch up to as many instruction as the DISPATCH stage can decode */
       i < (ruu_decode_width * fetch_speed)
       /* select two thread & fetch */
-      && th_seq < 2
+      && th_seq < 2;
       /* fetch until IFETCH -> DISPATCH queue fills */
       /* && fetch_num < ruu_ifq_size */
       /* and no IFETCH blocking condition encountered */
@@ -4452,8 +4493,9 @@ ruu_fetch(void)
   {
     th_id = selected_th[th_seq];
     struct thread_t *curr_th = &(thread[th_id]);
-    if (curr_th->fetch_num >= ruu_ifq_size || done) {
+    if (curr_th->fetch_num >= ruu_ifq_size || done[th_id] || curr_th->ruu_fetch_issue_delay) {
       th_seq++;
+      i--;
       continue;
     }
     /* fetch an instruction at the next predicted fetch address */
@@ -4504,11 +4546,11 @@ ruu_fetch(void)
       if (lat != cache_il1_lat)
       {
         /* I-cache miss, block fetch until it is resolved */
-        ruu_fetch_issue_delay += lat - 1;
+        curr_th->ruu_fetch_issue_delay += lat - 1;
         /* if I-cache miss, can next thread fetch?*/
-        /* th_seq++; */
-        /* continue; */
-        break;
+        th_seq++;
+        continue;
+        /* break; */
       }
       /* else, I-cache/I-TLB hit */
     }
@@ -4713,11 +4755,13 @@ sim_main(void)
 #endif /* HOST_HAS_QWORD */
     enum md_fault_type fault;
 
-    for (th=0; th<nthread; ++th) {
-      struct thread_t *curr_th = &(thread[th]);
-      fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count/nthread, th);
+/* for (th=0; th<nthread; ++th) { */
+      struct thread_t *curr_th = &(thread[0]);
+/* fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count/nthread, th); */
+      fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count, th);
 
-      for (icount=0; icount < fastfwd_count/nthread; icount++)
+/* for (icount=0; icount < fastfwd_count/nthread; icount++) */
+      for (icount=0; icount < fastfwd_count; icount++)
       {
         /* maintain $r0 semantics */
         curr_th->regs.regs_R[MD_REG_ZERO] = 0;
@@ -4777,7 +4821,7 @@ sim_main(void)
         curr_th->regs.regs_PC = curr_th->regs.regs_NPC;
         curr_th->regs.regs_NPC += sizeof(md_inst_t);
       }
-    }
+/* } */
   }
 
   fprintf(stderr, "sim: ** starting performance simulation **\n");
@@ -4795,15 +4839,18 @@ sim_main(void)
   for (;;)
   {
     /* RUU/LSQ sanity checks */
-    if (RUU_num < LSQ_num)
-      panic("RUU_num < LSQ_num");
-    if (((RUU_head + RUU_num) % RUU_size) != RUU_tail)
-      panic("RUU_head/RUU_tail wedged");
-    if (((LSQ_head + LSQ_num) % LSQ_size) != LSQ_tail)
-      panic("LSQ_head/LSQ_tail wedged");
+    for (th=0; th<nthread; ++th) {
+      struct thread_t *curr_th = &(thread[th]);
+      if (curr_th->RUU_num < curr_th->LSQ_num)
+        panic("RUU_num < LSQ_num");
+      if (((curr_th->RUU_head + curr_th->RUU_num) % RUU_size) != curr_th->RUU_tail)
+        panic("RUU_head/RUU_tail wedged");
+      if (((curr_th->LSQ_head + curr_th->LSQ_num) % LSQ_size) != curr_th->LSQ_tail)
+        panic("LSQ_head/LSQ_tail wedged");
 
-    /* check if pipetracing is still active */
-    ptrace_check_active(regs.regs_PC, sim_num_insn, sim_cycle);
+      /* check if pipetracing is still active */
+      ptrace_check_active(curr_th->regs.regs_PC, sim_num_insn, sim_cycle);
+    }
 
     /* indicate new cycle in pipetrace */
     ptrace_newcycle(sim_cycle);
@@ -4848,20 +4895,22 @@ sim_main(void)
 
     /* call instruction fetch unit if it is not blocked */
     /* FIXME : should consider ruu_fetch_issue_delay of each thread */
-    if (!ruu_fetch_issue_delay) {
-      ruu_fetch();
-    }
-    else {
-      ruu_fetch_issue_delay--;
+    ruu_fetch();
+    
+    for (th=0; th<nthread; ++th) {
+      struct thread_t *curr_th = &(thread[th]);
+      if (curr_th->ruu_fetch_issue_delay)
+        curr_th->ruu_fetch_issue_delay--;
     }
 
     /* update buffer occupancy stats */
-    IFQ_count += fetch_num;
-    IFQ_fcount += ((fetch_num == ruu_ifq_size) ? 1 : 0);
-    RUU_count += RUU_num;
-    RUU_fcount += ((RUU_num == RUU_size) ? 1 : 0);
-    LSQ_count += LSQ_num;
-    LSQ_fcount += ((LSQ_num == LSQ_size) ? 1 : 0);
+    /* FIXME: temporary update only for thread 0 */
+    IFQ_count += thread[0].fetch_num;
+    IFQ_fcount += ((thread[0].fetch_num == ruu_ifq_size) ? 1 : 0);
+    RUU_count += thread[0].RUU_num;
+    RUU_fcount += ((thread[0].RUU_num == RUU_size) ? 1 : 0);
+    LSQ_count += thread[0].LSQ_num;
+    LSQ_fcount += ((thread[0].LSQ_num == LSQ_size) ? 1 : 0);
 
     /* go to next cycle */
     sim_cycle++;
