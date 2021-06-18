@@ -4630,6 +4630,7 @@ ruu_fetch(void)
     /* adjust instruction fetch queue */
     curr_th->fetch_tail = (curr_th->fetch_tail + 1) & (ruu_ifq_size - 1);
     curr_th->fetch_num++;
+    curr_th->icount++;
   }
 }
 
