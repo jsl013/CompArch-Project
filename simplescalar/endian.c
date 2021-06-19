@@ -91,7 +91,7 @@ endian_host_word_order(void)
 /* probe target (simulated program) byte endian format, only
    valid after program has been loaded */
 enum endian_t
-endian_target_byte_order(void)
+endian_target_byte_order(int ld_target_big_endian)
 {
   return ld_target_big_endian ? endian_big : endian_little;
 }
@@ -99,10 +99,10 @@ endian_target_byte_order(void)
 /* probe target (simulated program) double word endian format,
    only valid after program has been loaded */
 enum endian_t
-endian_target_word_order(void)
+endian_target_word_order(int ld_target_big_endian)
 {
   /* same as byte sex for SimpleScalar target */
-  return endian_target_byte_order();
+  return endian_target_byte_order(ld_target_big_endian);
 }
 
 #endif /* !HOST_ONLY */

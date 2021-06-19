@@ -56,6 +56,7 @@
 #include "misc.h"
 #include "machine.h"
 #include "range.h"
+#include "memory.h"
 
 /*
  * pipeline events:
@@ -105,7 +106,8 @@ extern int ptrace_oneshot;
 /* open pipeline trace */
 void
 ptrace_open(char *range,		/* trace range */
-	    char *fname);		/* output filename */
+	    char *fname,		/* output filename */
+      struct mem_t *mem);
 
 /* close pipeline trace */
 void

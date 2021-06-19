@@ -232,6 +232,20 @@ mem_init(struct mem_t *mem)	/* memory space to initialize */
   mem->page_count = 0;
   mem->ptab_misses = 0;
   mem->ptab_accesses = 0;
+  mem->ld_text_base = 0;
+  mem->ld_text_size = 0;
+  mem->ld_bss_base = 0;
+  mem->ld_bss_size = 0;
+  mem->ld_data_base = 0;
+  mem->ld_data_size = 0;
+  mem->ld_brk_point = 0;
+  mem->ld_stack_base = 0;
+  mem->ld_stack_size = 0;
+  mem->ld_stack_min = 0;
+  mem->ld_prog_fname = 0;
+  mem->ld_prog_entry = 0;
+  mem->ld_environ_base = 0;
+  mem->ld_target_big_endian = 0;
 }
 
 /* dump a block of memory, returns any faults encountered */

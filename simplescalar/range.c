@@ -66,7 +66,8 @@
 /* parse execution position *PSTR to *POS */
 char *						/* error string, or NULL */
 range_parse_pos(char *pstr,			/* execution position string */
-		struct range_pos_t *pos)	/* position return buffer */
+		struct range_pos_t *pos,	/* position return buffer */
+    struct mem_t *mem)
 {
   char *s, *endp;
   struct sym_sym_t *sym;
@@ -114,7 +115,7 @@ range_parse_pos(char *pstr,			/* execution position string */
     }
 
   /* else, attempt symbol lookup */
-  sym_loadsyms(ld_prog_fname, /* !locals */FALSE);
+  sym_loadsyms(mem->ld_prog_fname, /* !locals */FALSE, mem);
   sym = sym_bind_name(s, NULL, sdb_any);
   if (sym != NULL)
     {
@@ -150,7 +151,8 @@ range_print_pos(struct range_pos_t *pos,	/* execution position */
 /* parse execution range *RSTR to *RANGE */
 char *						/* error string, or NULL */
 range_parse_range(char *rstr,			/* execution range string */
-		  struct range_range_t *range)	/* range return buffer */
+		  struct range_range_t *range,	/* range return buffer */
+      struct mem_t *mem)
 {
   char *pos1, *pos2, *p, buf[512], *errstr;
 
@@ -174,7 +176,7 @@ range_parse_range(char *rstr,			/* execution range string */
   /* parse start position */
   if (*pos1 && *pos1 != ':')
     {
-      errstr = range_parse_pos(pos1, &range->start);
+      errstr = range_parse_pos(pos1, &range->start, mem);
       if (errstr)
 	return errstr;
     }
@@ -213,7 +215,7 @@ range_parse_range(char *rstr,			/* execution range string */
 	}
       else
 	{
-	  errstr = range_parse_pos(pos2, &range->end);
+	  errstr = range_parse_pos(pos2, &range->end, mem);
 	  if (errstr)
 	    return errstr;
 	}

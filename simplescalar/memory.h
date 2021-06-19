@@ -82,6 +82,50 @@ struct mem_t {
   counter_t ptab_misses;		/* total first level page tbl misses */
   counter_t ptab_accesses;		/* total page table accesses */
   int thread_id;            /* thread ID of this memory space*/
+
+  AlphaSystemState _system;
+
+  /* program text (code) segment base */
+  md_addr_t ld_text_base;
+
+  /* program text (code) size in bytes */
+  unsigned int ld_text_size;
+
+  /* program bss segment base */
+  md_addr_t ld_bss_base;
+
+  /* program bss size in bytes */
+  unsigned int ld_bss_size;
+
+  /* program initialized data segment base */
+  md_addr_t ld_data_base;
+
+  /* program initialized ".data" and uninitialized ".bss" size in bytes */
+  unsigned int ld_data_size;
+
+  /* top of the data segment */
+  md_addr_t ld_brk_point;
+
+  /* program stack segment base (highest address in stack) */
+  md_addr_t ld_stack_base;
+
+  /* program initial stack size */
+  unsigned int ld_stack_size;
+
+  /* lowest address accessed on the stack */
+  md_addr_t ld_stack_min;
+
+  /* program file name */
+  char *ld_prog_fname;
+
+  /* program entry point (initial PC) */
+  md_addr_t ld_prog_entry;
+
+  /* program environment base address address */
+  md_addr_t ld_environ_base;
+
+  /* target executable endian-ness, non-zero if big endian */
+  int ld_target_big_endian;
 };
 
 /* memory access command */

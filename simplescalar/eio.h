@@ -61,7 +61,7 @@
 /* EIO file version */
 #define EIO_FILE_VERSION		3
 
-FILE *eio_create(char *fname);
+FILE *eio_create(char *fname, struct mem_t *mem);
 
 FILE *eio_open(char *fname);
 

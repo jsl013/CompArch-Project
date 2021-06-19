@@ -216,7 +216,8 @@ ncmp(struct sym_sym_t **sym1, struct sym_sym_t **sym2)
 /* load symbols out of FNAME */
 void
 sym_loadsyms(char *fname,	/* file name containing symbols */
-	     int load_locals)	/* load local symbols */
+	     int load_locals,	/* load local symbols */
+       struct mem_t *mem)
 {
   int i, debug_cnt;
 #ifdef BFD_LOADER
@@ -234,14 +235,6 @@ sym_loadsyms(char *fname,	/* file name containing symbols */
 #endif /* BFD_LOADER */
   int th_id = -1;
   int th;
-  for (th=0; th<MAX_TH; th++) {
-    if (!strcmp(fname, ld_prog_fname[th])) {
-      th_id = th;
-      break;
-    }
-  }
-  if (th_id == -1) 
-    panic("[sym_loadsyms] There is no file containing symbols");
 
   if (syms_loaded)
     {
@@ -267,7 +260,7 @@ sym_loadsyms(char *fname,	/* file name containing symbols */
     }
 
   /* sanity check, endian should be the same as loader.c encountered */
-  if (abfd->xvec->byteorder_big_p != (unsigned)ld_target_big_endian)
+  if (abfd->xvec->byteorder_big_p != (unsigned)mem->ld_target_big_endian)
     panic("binary endian changed");
 
   if ((bfd_get_file_flags(abfd) & (HAS_SYMS|HAS_LOCALS)))
@@ -616,14 +609,14 @@ sym_loadsyms(char *fname,	/* file name containing symbols */
       sym_textsyms[i]->size =
 	(i != (sym_ntextsyms - 1)
 	 ? (sym_textsyms[i+1]->addr - sym_textsyms[i]->addr)
-	 : ((ld_text_base[th_id] + ld_text_size[th_id]) - sym_textsyms[i]->addr));
+	 : ((mem->ld_text_base + mem->ld_text_size) - sym_textsyms[i]->addr));
     }
   for (i=0; i<sym_ndatasyms; i++)
     {
       sym_datasyms[i]->size =
 	(i != (sym_ndatasyms - 1)
 	 ? (sym_datasyms[i+1]->addr - sym_datasyms[i]->addr)
-	 : ((ld_data_base[th_id] + ld_data_size[th_id]) - sym_datasyms[i]->addr));
+	 : ((mem->ld_data_base + mem->ld_data_size) - sym_datasyms[i]->addr));
     }
 
   /* symbols are now available for use */

@@ -73,7 +73,8 @@ int ptrace_oneshot = FALSE;
 /* open pipeline trace */
 void
 ptrace_open(char *fname,		/* output filename */
-	    char *range)		/* trace range */
+	    char *range,		/* trace range */
+      struct mem_t *mem)
 {
   char *errstr;
 
@@ -81,14 +82,14 @@ ptrace_open(char *fname,		/* output filename */
   if (!range)
     {
       /* no range */
-      errstr = range_parse_range(":", &ptrace_range);
+      errstr = range_parse_range(":", &ptrace_range, mem);
       if (errstr)
 	panic("cannot parse pipetrace range, use: {<start>}:{<end>}");
       ptrace_active = TRUE;
     }
   else
     {
-      errstr = range_parse_range(range, &ptrace_range);
+      errstr = range_parse_range(range, &ptrace_range, mem);
       if (errstr)
 	fatal("cannot parse pipetrace range, use: {<start>}:{<end>}");
       ptrace_active = FALSE;

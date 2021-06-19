@@ -102,7 +102,8 @@ extern struct sym_sym_t **sym_datasyms_by_name;
 /* load symbols out of FNAME */
 void
 sym_loadsyms(char *fname,		/* file name containing symbols */
-	     int load_locals);		/* load local symbols */
+	     int load_locals,		/* load local symbols */
+       struct mem_t *mem);
 
 /* dump symbol SYM to output stream FD */
 void

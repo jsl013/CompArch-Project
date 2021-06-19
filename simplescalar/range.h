@@ -87,7 +87,8 @@ struct range_range_t {
 /* parse execution position *PSTR to *POS */
 char *						/* error string, or NULL */
 range_parse_pos(char *pstr,			/* execution position string */
-		struct range_pos_t *pos);	/* position return buffer */
+		struct range_pos_t *pos,	/* position return buffer */
+    struct mem_t *mem);
 
 /* print execution position *POS */
 void
@@ -97,7 +98,8 @@ range_print_pos(struct range_pos_t *pos,	/* execution position */
 /* parse execution range *RSTR to *RANGE */
 char *						/* error string, or NULL */
 range_parse_range(char *rstr,			/* execution range string */
-		  struct range_range_t *range);	/* range return buffer */
+		  struct range_range_t *range,	/* range return buffer */
+      struct mem_t *mem);
 
 /* print execution range *RANGE */
 void

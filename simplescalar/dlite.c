@@ -218,7 +218,7 @@ ident_evaluator(struct eval_state_t *es)	/* expression evaluator */
     }
 
   /* else, try to locate a program symbol */
-  sym_loadsyms(ld_prog_fname, /* load locals */TRUE);
+  sym_loadsyms(es->mem->ld_prog_fname, /* load locals */TRUE, es->mem);
   sym = sym_bind_name(es->tok_buf, NULL, sdb_any);
   if (sym)
     {
@@ -1986,7 +1986,7 @@ dlite_rbreak(int nargs, union arg_val_t args[],	/* command arguments */
     }
 
   /* check range */
-  errstr = range_parse_range(args[0].as_str, &range);
+  errstr = range_parse_range(args[0].as_str, &range, mem);
   if (errstr)
     return errstr;
 
@@ -2084,7 +2084,7 @@ dlite_symbols(int nargs, union arg_val_t args[],/* command arguments */
     return "wrong number of arguments";
 
   /* load symbols, if not already loaded */
-  sym_loadsyms(ld_prog_fname, /* !locals */FALSE);
+  sym_loadsyms(mem->ld_prog_fname, /* !locals */FALSE, mem);
 
   /* print all symbol values */
   for (i=0; i<sym_nsyms; i++)
@@ -2106,7 +2106,7 @@ dlite_tsymbols(int nargs, union arg_val_t args[],/* command arguments */
     return "wrong number of arguments";
 
   /* load symbols, if not already loaded */
-  sym_loadsyms(ld_prog_fname, /* !locals */FALSE);
+  sym_loadsyms(mem->ld_prog_fname, /* !locals */FALSE, mem);
 
   /* print all symbol values */
   for (i=0; i<sym_ntextsyms; i++)
@@ -2128,7 +2128,7 @@ dlite_dsymbols(int nargs, union arg_val_t args[],/* command arguments */
     return "wrong number of arguments";
 
   /* load symbols, if not already loaded */
-  sym_loadsyms(ld_prog_fname, /* !locals */FALSE);
+  sym_loadsyms(mem->ld_prog_fname, /* !locals */FALSE, mem);
 
   /* print all symbol values */
   for (i=0; i<sym_ndatasyms; i++)
@@ -2151,7 +2151,7 @@ dlite_symbol(int nargs, union arg_val_t args[],	/* command arguments */
     return "wrong number of arguments";
 
   /* load symbols, if not already loaded */
-  sym_loadsyms(ld_prog_fname, /* !locals */FALSE);
+  sym_loadsyms(mem->ld_prog_fname, /* !locals */FALSE, mem);
 
   /* print a single option, specified by argument */
   sym = sym_bind_name(args[0].as_str, &index, sdb_any);

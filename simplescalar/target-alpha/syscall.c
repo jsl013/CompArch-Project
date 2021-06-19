@@ -1407,17 +1407,17 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 	md_addr_t addr;
 
 	delta = regs->regs_R[MD_REG_A0];
-	addr = ld_brk_point + delta;
+	addr = mem->ld_brk_point + delta;
 
 	if (verbose)
 	  myfprintf(stderr, "SYS_sbrk: delta: 0x%012p (%ld)\n", delta, delta);
 
-	ld_brk_point = addr;
-	regs->regs_R[MD_REG_V0] = ld_brk_point;
+	mem->ld_brk_point = addr;
+	regs->regs_R[MD_REG_V0] = mem->ld_brk_point;
 	regs->regs_R[MD_REG_A3] = 0;
 
 	if (verbose)
-	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", ld_brk_point);
+	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", mem->ld_brk_point);
 
 #if 0
 	/* check whether heap area has merged with stack area */
@@ -1448,12 +1448,12 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 	if (verbose)
 	  myfprintf(stderr, "SYS_obreak: addr: 0x%012p\n", addr);
 
-	ld_brk_point = addr;
-	regs->regs_R[MD_REG_V0] = ld_brk_point;
+	mem->ld_brk_point = addr;
+	regs->regs_R[MD_REG_V0] = mem->ld_brk_point;
 	regs->regs_R[MD_REG_A3] = 0;
 
 	if (verbose)
-	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", ld_brk_point);
+	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", mem->ld_brk_point);
       }
       break;
 

@@ -90,6 +90,7 @@ struct eval_state_t {
   void *user_ptr;		/* user-supplied argument pointer */
   char tok_buf[512];		/* text of last token returned */
   enum eval_token_t peek_tok;	/* peek buffer, for one token look-ahead */
+  struct mem_t *mem;
 };
 
 /* evaluation errors */

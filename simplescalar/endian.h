@@ -83,12 +83,12 @@ endian_host_word_order(void);
 /* probe target (simulated program) byte endian format, only
    valid after program has been loaded */
 enum endian_t
-endian_target_byte_order(void);
+endian_target_byte_order(int);
 
 /* probe target (simulated program) double word endian format,
    only valid after program has been loaded */
 enum endian_t
-endian_target_word_order(void);
+endian_target_word_order(int);
 
 #endif /* HOST_ONLY */
 

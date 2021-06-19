@@ -94,7 +94,7 @@
 static counter_t eio_trans_icnt = -1;
 
 FILE *
-eio_create(char *fname)
+eio_create(char *fname, struct mem_t *mem)
 {
   FILE *fd;
   struct exo_term_t *exo;
@@ -109,7 +109,7 @@ eio_create(char *fname)
   /* emit EIO file header */
   fprintf(fd, "%s\n", EIO_FILE_HEADER);
   fprintf(fd, "/* file_format: %d, file_version: %d, big_endian: %d */\n", 
-	  MD_EIO_FILE_FORMAT, EIO_FILE_VERSION, ld_target_big_endian);
+	  MD_EIO_FILE_FORMAT, EIO_FILE_VERSION, mem->ld_target_big_endian);
   exo = exo_new(ec_list,
 		exo_new(ec_integer, (exo_integer_t)MD_EIO_FILE_FORMAT),
 		exo_new(ec_integer, (exo_integer_t)EIO_FILE_VERSION),
@@ -251,8 +251,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
   fprintf(fd, "/* writing `%d' memory pages... */\n", (int)mem->page_count);
   exo = exo_new(ec_list,
 		exo_new(ec_integer, (exo_integer_t)mem->page_count),
-		exo_new(ec_address, (exo_integer_t)ld_brk_point[th_id]),
-		exo_new(ec_address, (exo_integer_t)ld_stack_min[th_id]),
+		exo_new(ec_address, (exo_integer_t)mem->ld_brk_point),
+		exo_new(ec_address, (exo_integer_t)mem->ld_stack_min),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -260,8 +260,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* text segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_text_base[th_id]),
-		exo_new(ec_integer, (exo_integer_t)ld_text_size[th_id]),
+		exo_new(ec_address, (exo_integer_t)mem->ld_text_base),
+		exo_new(ec_integer, (exo_integer_t)mem->ld_text_size),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -269,8 +269,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* data segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_data_base[th_id]),
-		exo_new(ec_integer, (exo_integer_t)ld_data_size[th_id]),
+		exo_new(ec_address, (exo_integer_t)mem->ld_data_base),
+		exo_new(ec_integer, (exo_integer_t)mem->ld_data_size),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -278,8 +278,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* stack segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_stack_base[th_id]),
-		exo_new(ec_integer, (exo_integer_t)ld_stack_size[th_id]),
+		exo_new(ec_address, (exo_integer_t)mem->ld_stack_base),
+		exo_new(ec_integer, (exo_integer_t)mem->ld_stack_size),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -383,9 +383,9 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->next->next != NULL)
     fatal("could not read EIO memory page count");
   page_count = exo->as_list.head->as_integer.val;
-  ld_brk_point[th_id] = (md_addr_t)exo->as_list.head->next->as_address.val;
-  _system[th_id].brk_point = ld_brk_point[th_id];
-  ld_stack_min[th_id] = (md_addr_t)exo->as_list.head->next->next->as_address.val;
+  mem->ld_brk_point = (md_addr_t)exo->as_list.head->next->as_address.val;
+  mem->_system.brk_point = mem->ld_brk_point;
+  mem->ld_stack_min = (md_addr_t)exo->as_list.head->next->next->as_address.val;
   exo_delete(exo);
 
   /* read text segment specifiers */
@@ -398,8 +398,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO text segment specifiers");
-  ld_text_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_text_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
+  mem->ld_text_base = (md_addr_t)exo->as_list.head->as_address.val;
+  mem->ld_text_size = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   /* read data segment specifiers */
@@ -412,8 +412,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO data segment specifiers");
-  ld_data_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_data_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
+  mem->ld_data_base = (md_addr_t)exo->as_list.head->as_address.val;
+  mem->ld_data_size = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   /* read stack segment specifiers */
@@ -426,8 +426,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO stack segment specifiers");
-  ld_stack_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_stack_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
+  mem->ld_stack_base = (md_addr_t)exo->as_list.head->as_address.val;
+  mem->ld_stack_size = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   for (i=0; i < page_count; i++)
@@ -609,7 +609,7 @@ eio_write_trace(FILE *eio_fd,			/* EIO stream file desc */
   output_regs = exo_new(ec_list, NULL);
   output_regs->as_list.head =
 	exo_chain(output_regs->as_list.head,
-		  exo_new(ec_address, (exo_integer_t)ld_brk_point[th_id]));
+		  exo_new(ec_address, (exo_integer_t)mem->ld_brk_point));
   for (i=MD_FIRST_OUT_REG; i <= MD_LAST_OUT_REG; i++)
     {
       output_regs->as_list.head =
@@ -772,7 +772,7 @@ eio_read_trace(FILE *eio_fd,			/* EIO stream file desc */
   brkrec = exo_outregs->as_list.head;
   if (!brkrec || brkrec->ec != ec_address)
     fatal("EIO trace inconsistency: missing memory breakpoint");
-  ld_brk_point[th_id] = (md_addr_t)brkrec->as_address.val;
+  mem->ld_brk_point = (md_addr_t)brkrec->as_address.val;
 
   /* write integer register outputs */
   for (i=MD_FIRST_OUT_REG, regrec=exo_outregs->as_list.head->next;

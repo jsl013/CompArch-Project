@@ -1486,7 +1486,7 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
         /* print fn */NULL);
   }
   for (i=0; i<nthread; ++i) {
-    ld_reg_stats(sdb, i);
+    ld_reg_stats(sdb, thread[i].mem);
     mem_reg_stats(thread[i].mem, sdb);
   }
 }
@@ -1585,7 +1585,7 @@ sim_load_prog(char *fname,		/* program to load */
     /* th_argv[i] = argv[argv_start+i]; */
     /* } */
     /* ld_load_prog(th_argv[0], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE, th); */
-    ld_load_prog(argv[argv_start], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE, th);
+    ld_load_prog(argv[argv_start], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE);
     argv_start += th_argc[th]+1;
     /* for (i=0; i<th_argc[th]; ++i) { */
     /* free(th_argv[i]); */
@@ -1597,7 +1597,7 @@ sim_load_prog(char *fname,		/* program to load */
   if (ptrace_nelt == 2)
   {
     /* generate a pipeline trace */
-    ptrace_open(/* fname */ptrace_opts[0], /* range */ptrace_opts[1]);
+    ptrace_open(/* fname */ptrace_opts[0], /* range */ptrace_opts[1], thread[0].mem);
   }
   else if (ptrace_nelt == 0)
   {
@@ -2330,153 +2330,162 @@ ruu_commit(void)
   static counter_t sim_ret_insn;
   counter_t dl1_misses;
   counter_t dl2_misses;
-  int th;
+  static int th_id = 0;
+  int try_th = 0;
+  struct thread_t *curr_th = &(thread[th_id]);
+
+  committed = 0;
+  sim_ret_insn = 0;
 
   /* all values must be retired to the architected reg file in program order */
-  for (th=0; th<nthread; ++th) {
-    struct thread_t *curr_th = &(thread[th]);
-    committed = 0;
-    sim_ret_insn = 0;
-    while (curr_th->RUU_num > 0 && committed < ruu_commit_width)
-    {
-      struct RUU_station *rs = &(curr_th->RUU[curr_th->RUU_head]);
+/* while (curr_th->RUU_num > 0 && committed < ruu_commit_width) */
+  while (try_th < nthread && committed < ruu_commit_width)
+  {
+    curr_th = &(thread[th_id]);
+    if (curr_th->RUU_num == 0) {
+      th_id = (th_id + 1) % nthread;
+      try_th++;
+      continue;
+    }
+    struct RUU_station *rs = &(curr_th->RUU[curr_th->RUU_head]);
 
-      if (!rs->completed)
+    if (!rs->completed)
+    {
+      /* at least RUU entry must be complete */
+      break;
+    }
+
+    /* default commit events */
+    events = 0;
+
+    /* load/stores must retire load/store queue entry as well */
+    if (curr_th->RUU[curr_th->RUU_head].ea_comp)
+    {
+      /* load/store, retire head of LSQ as well */
+      if (curr_th->LSQ_num <= 0 || !curr_th->LSQ[curr_th->LSQ_head].in_LSQ)
+        panic("RUU out of sync with LSQ");
+
+      /* load/store operation must be complete */
+      if (!curr_th->LSQ[curr_th->LSQ_head].completed)
       {
-        /* at least RUU entry must be complete */
+        /* load/store operation is not yet complete */
         break;
       }
 
-      /* default commit events */
-      events = 0;
-
-      /* load/stores must retire load/store queue entry as well */
-      if (curr_th->RUU[curr_th->RUU_head].ea_comp)
+      if ((MD_OP_FLAGS(curr_th->LSQ[curr_th->LSQ_head].op) & (F_MEM|F_STORE))
+          == (F_MEM|F_STORE))
       {
-        /* load/store, retire head of LSQ as well */
-        if (curr_th->LSQ_num <= 0 || !curr_th->LSQ[curr_th->LSQ_head].in_LSQ)
-          panic("RUU out of sync with LSQ");
+        struct res_template *fu;
 
-        /* load/store operation must be complete */
-        if (!curr_th->LSQ[curr_th->LSQ_head].completed)
+
+        /* stores must retire their store value to the cache at commit,
+           try to get a store port (functional unit allocation) */
+        fu = res_get(fu_pool, MD_OP_FUCLASS(curr_th->LSQ[curr_th->LSQ_head].op));
+        if (fu)
         {
-          /* load/store operation is not yet complete */
+          /* reserve the functional unit */
+          if (fu->master->busy)
+            panic("functional unit already in use");
+
+          /* schedule functional unit release event */
+          fu->master->busy = fu->issuelat;
+
+          /* go to the data cache */
+          if (cache_dl1)
+          {
+            dl1_misses = cache_dl1->misses;
+            dl2_misses = cache_dl2->misses;
+            /* commit store value to D-cache */
+            lat =
+              cache_access(cache_dl1, Write, (curr_th->LSQ[curr_th->LSQ_head].addr&~3),
+                  NULL, 4, sim_cycle, NULL, NULL, th_id);
+            if (lat > cache_dl1_lat)
+              events |= PEV_CACHEMISS;
+          }
+
+          /* all loads and stores must to access D-TLB */
+          if (dtlb)
+          {
+            /* access the D-TLB */
+            lat =
+              cache_access(dtlb, Read, (curr_th->LSQ[curr_th->LSQ_head].addr & ~3),
+                  NULL, 4, sim_cycle, NULL, NULL, th_id);
+            if (lat > 1) {
+              events |= PEV_TLBMISS;
+            }
+          }
+        }
+        else
+        {
+          /* no store ports left, cannot continue to commit insts */
           break;
         }
-
-        if ((MD_OP_FLAGS(curr_th->LSQ[curr_th->LSQ_head].op) & (F_MEM|F_STORE))
-            == (F_MEM|F_STORE))
-        {
-          struct res_template *fu;
-
-
-          /* stores must retire their store value to the cache at commit,
-             try to get a store port (functional unit allocation) */
-          fu = res_get(fu_pool, MD_OP_FUCLASS(curr_th->LSQ[curr_th->LSQ_head].op));
-          if (fu)
-          {
-            /* reserve the functional unit */
-            if (fu->master->busy)
-              panic("functional unit already in use");
-
-            /* schedule functional unit release event */
-            fu->master->busy = fu->issuelat;
-
-            /* go to the data cache */
-            if (cache_dl1)
-            {
-              dl1_misses = cache_dl1->misses;
-              dl2_misses = cache_dl2->misses;
-              /* commit store value to D-cache */
-              lat =
-                cache_access(cache_dl1, Write, (curr_th->LSQ[curr_th->LSQ_head].addr&~3),
-                    NULL, 4, sim_cycle, NULL, NULL, th);
-              if (lat > cache_dl1_lat)
-                events |= PEV_CACHEMISS;
-            }
-
-            /* all loads and stores must to access D-TLB */
-            if (dtlb)
-            {
-              /* access the D-TLB */
-              lat =
-                cache_access(dtlb, Read, (curr_th->LSQ[curr_th->LSQ_head].addr & ~3),
-                    NULL, 4, sim_cycle, NULL, NULL, th);
-              if (lat > 1) {
-                events |= PEV_TLBMISS;
-              }
-            }
-          }
-          else
-          {
-            /* no store ports left, cannot continue to commit insts */
-            break;
-          }
-        }
-
-        /* invalidate load/store operation instance */
-        curr_th->LSQ[curr_th->LSQ_head].tag++;
-        sim_slip += (sim_cycle - curr_th->LSQ[curr_th->LSQ_head].slip);
-
-        /* indicate to pipeline trace that this instruction retired */
-        ptrace_newstage(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq, PST_COMMIT, events);
-        ptrace_endinst(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq);
-
-        /* commit head of LSQ as well */
-        curr_th->LSQ_head = (curr_th->LSQ_head + 1) % LSQ_size;
-        curr_th->LSQ_num--;
       }
 
-      if (pred
-          && bpred_spec_update == spec_CT
-          && (MD_OP_FLAGS(rs->op) & F_CTRL))
-      {
-        bpred_update(pred,
-            /* branch address */rs->PC,
-            /* actual target address */rs->next_PC,
-            /* taken? */rs->next_PC != (rs->PC +
-              sizeof(md_inst_t)),
-            /* pred taken? */rs->pred_PC != (rs->PC +
-              sizeof(md_inst_t)),
-            /* correct pred? */rs->pred_PC == rs->next_PC,
-            /* opcode */rs->op,
-            /* dir predictor update pointer */&rs->dir_update);
-        curr_th->brcount--;
-      }
-
-      /* invalidate RUU operation instance */
-      curr_th->RUU[curr_th->RUU_head].tag++;
-      sim_slip += (sim_cycle - curr_th->RUU[curr_th->RUU_head].slip);
-      /* print retirement trace if in verbose mode */
-      if (verbose)
-      {
-        sim_ret_insn++;
-        myfprintf(stderr, "%10n @ 0x%08p: ", sim_ret_insn, curr_th->RUU[curr_th->RUU_head].PC);
-        md_print_insn(curr_th->RUU[curr_th->RUU_head].IR, curr_th->RUU[curr_th->RUU_head].PC, stderr);
-        if (MD_OP_FLAGS(curr_th->RUU[curr_th->RUU_head].op) & F_MEM)
-          myfprintf(stderr, "  mem: 0x%08p", curr_th->RUU[curr_th->RUU_head].addr);
-        fprintf(stderr, "\n");
-        /* fflush(stderr); */
-      }
+      /* invalidate load/store operation instance */
+      curr_th->LSQ[curr_th->LSQ_head].tag++;
+      sim_slip += (sim_cycle - curr_th->LSQ[curr_th->LSQ_head].slip);
 
       /* indicate to pipeline trace that this instruction retired */
-      ptrace_newstage(curr_th->RUU[curr_th->RUU_head].ptrace_seq, PST_COMMIT, events);
-      ptrace_endinst(curr_th->RUU[curr_th->RUU_head].ptrace_seq);
+      ptrace_newstage(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq, PST_COMMIT, events);
+      ptrace_endinst(curr_th->LSQ[curr_th->LSQ_head].ptrace_seq);
 
-      /* commit head entry of RUU */
-      curr_th->RUU_head = (curr_th->RUU_head + 1) % RUU_size;
-      curr_th->RUU_num--;
+      /* commit head of LSQ as well */
+      curr_th->LSQ_head = (curr_th->LSQ_head + 1) % LSQ_size;
+      curr_th->LSQ_num--;
+    }
 
-      /* one more instruction committed to architected state */
-      committed++;
+    if (pred
+        && bpred_spec_update == spec_CT
+        && (MD_OP_FLAGS(rs->op) & F_CTRL))
+    {
+      bpred_update(pred,
+          /* branch address */rs->PC,
+          /* actual target address */rs->next_PC,
+          /* taken? */rs->next_PC != (rs->PC +
+            sizeof(md_inst_t)),
+          /* pred taken? */rs->pred_PC != (rs->PC +
+            sizeof(md_inst_t)),
+          /* correct pred? */rs->pred_PC == rs->next_PC,
+          /* opcode */rs->op,
+          /* dir predictor update pointer */&rs->dir_update);
+      curr_th->brcount--;
+    }
 
-      for (i=0; i<MAX_ODEPS; i++)
-      {
-        if (rs->odep_list[i])
-          panic ("retired instruction has odeps\n");
-      }
+    /* invalidate RUU operation instance */
+    curr_th->RUU[curr_th->RUU_head].tag++;
+    sim_slip += (sim_cycle - curr_th->RUU[curr_th->RUU_head].slip);
+    /* print retirement trace if in verbose mode */
+    if (verbose)
+    {
+      sim_ret_insn++;
+      myfprintf(stderr, "%10n @ 0x%08p: ", sim_ret_insn, curr_th->RUU[curr_th->RUU_head].PC);
+      md_print_insn(curr_th->RUU[curr_th->RUU_head].IR, curr_th->RUU[curr_th->RUU_head].PC, stderr);
+      if (MD_OP_FLAGS(curr_th->RUU[curr_th->RUU_head].op) & F_MEM)
+        myfprintf(stderr, "  mem: 0x%08p", curr_th->RUU[curr_th->RUU_head].addr);
+      fprintf(stderr, "\n");
+      /* fflush(stderr); */
+    }
+
+    /* indicate to pipeline trace that this instruction retired */
+    ptrace_newstage(curr_th->RUU[curr_th->RUU_head].ptrace_seq, PST_COMMIT, events);
+    ptrace_endinst(curr_th->RUU[curr_th->RUU_head].ptrace_seq);
+
+    /* commit head entry of RUU */
+    curr_th->RUU_head = (curr_th->RUU_head + 1) % RUU_size;
+    curr_th->RUU_num--;
+
+    /* one more instruction committed to architected state */
+    committed++;
+
+    for (i=0; i<MAX_ODEPS; i++)
+    {
+      if (rs->odep_list[i])
+        panic ("retired instruction has odeps\n");
     }
   }
+
+  th_id = (th_id + 1) % nthread;
 }
 
 
@@ -2856,7 +2865,6 @@ ruu_issue(void)
     {
       struct RUU_station *rs = RSLINK_RS(node);
       struct thread_t *curr_th = &(thread[rs->thread_id]);
-      int th_id = rs->thread_id;
 
       /* issue operation, both reg and mem deps have been satisfied */
       if (!OPERANDS_READY(rs) || !rs->queued
@@ -3282,6 +3290,7 @@ spec_mem_access(struct mem_t *mem,		/* memory space to access */
   int i, index;
   struct spec_mem_ent *ent, *prev;
   int th_id = mem->thread_id;
+  struct thread_t *curr_th = &(thread[th_id]);
 
   /* FIXME: partially overlapping writes are not combined... */
   /* FIXME: partially overlapping reads are not handled correctly... */
@@ -3297,7 +3306,7 @@ spec_mem_access(struct mem_t *mem,		/* memory space to access */
   }
 
   /* check permissions */
-  if (!((addr >= ld_text_base[th_id] && addr < (ld_text_base[th_id]+ld_text_size[th_id])
+  if (!((addr >= curr_th->mem->ld_text_base && addr < (curr_th->mem->ld_text_base+curr_th->mem->ld_text_size)
           && cmd == Read)
         || MD_VALID_ADDR(addr)))
   {
@@ -4592,8 +4601,8 @@ ruu_fetch(void)
     curr_th->fetch_regs_PC = curr_th->fetch_pred_PC;
 
     /* is this a bogus text address? (can happen on mis-spec path) */
-    if (1 || ld_text_base[th_id] <= curr_th->fetch_regs_PC
-        && curr_th->fetch_regs_PC < (ld_text_base[th_id]+ld_text_size[th_id])
+    if (1 || curr_th->mem->ld_text_base <= curr_th->fetch_regs_PC
+        && curr_th->fetch_regs_PC < (curr_th->mem->ld_text_base+curr_th->mem->ld_text_size)
         && !(curr_th->fetch_regs_PC & (sizeof(md_inst_t)-1)))
     {
       /* read instruction from memory */
@@ -4818,7 +4827,7 @@ sim_main(void)
   int th;
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-    curr_th->regs.regs_PC = ld_prog_entry[th];
+    curr_th->regs.regs_PC = curr_th->mem->ld_prog_entry;
     curr_th->regs.regs_NPC = curr_th->regs.regs_PC + sizeof(md_inst_t);
 
     /* check for DLite debugger entry condition */
