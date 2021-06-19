@@ -150,6 +150,18 @@ struct thread_t {
 /* number of SMT threads */
 static int nthread;
 
+/* SMT fetch policy option {icount|brcount|mcount} */
+static char *smt_fetch_policy;
+
+/* ICOUNT policy enable bit */
+static int icount_en = FALSE;
+
+/* BRCOUNT policy enable bit */
+static int brcount_en = FALSE;
+
+/* MCOUNT policy enable bit */
+static int mcount_en = FALSE;
+
 /* maximum number of inst's to execute */
 static unsigned int max_insts;
 
@@ -663,9 +675,16 @@ sim_reg_options(struct opt_odb_t *odb)
       );
 
   /* SMT : number of threads */
+
   opt_reg_int(odb, "-smt:nthread",
       "total number of SMT threads",
       &nthread, /* default */16,
+      /* print */TRUE, /* format */NULL);
+
+  /* SMT fetch policy options*/
+  opt_reg_string(odb, "-smt:policy",
+      "SMT fetch policy option {icount|brcount|mcount}",
+      &smt_fetch_policy, /* default */"icount",
       /* print */TRUE, /* format */NULL);
 
   /* instruction limit */
@@ -992,6 +1011,19 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
 
   if (fetch_speed < 1)
     fatal("front-end speed must be positive and non-zero");
+
+  if (!mystricmp(smt_fetch_policy, "icount"))
+  {
+    icount_en = TRUE;
+  }
+  else if (!mystricmp(smt_fetch_policy, "mcount"))
+  {
+    mcount_en = TRUE;
+  }
+  else if (!mystricmp(smt_fetch_policy, "brcount"))
+  {
+    brcount_en = TRUE;
+  }
 
   if (!mystricmp(pred_type, "perfect"))
   {
@@ -2361,10 +2393,6 @@ ruu_commit(void)
                     NULL, 4, sim_cycle, NULL, NULL, th);
               if (lat > cache_dl1_lat)
                 events |= PEV_CACHEMISS;
-              if (lat == CACHE_BLKED) {
-                fu->master->busy = 0;
-                break;
-              }
             }
 
             /* all loads and stores must to access D-TLB */
@@ -2413,6 +2441,7 @@ ruu_commit(void)
             /* correct pred? */rs->pred_PC == rs->next_PC,
             /* opcode */rs->op,
             /* dir predictor update pointer */&rs->dir_update);
+        curr_th->brcount--;
       }
 
       /* invalidate RUU operation instance */
@@ -2508,6 +2537,9 @@ ruu_recover(int thread_id, int branch_index)			/* index of mis-pred branch */
       LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
       curr_th->LSQ_num--;
     }
+
+    if (MD_OP_FLAGS(curr_th->RUU[RUU_index].op) & F_CTRL)
+      curr_th->brcount--;
 
     /* recover any resources used by this RUU operation */
     for (i=0; i<MAX_ODEPS; i++)
@@ -2924,16 +2956,6 @@ ruu_issue(void)
                         sim_cycle, NULL, NULL, rs->thread_id);
                   if (load_lat > cache_dl1_lat)
                     events |= PEV_CACHEMISS;
-                  if (load_lat == CACHE_BLKED) {
-                    fu->master->busy = 0;
-                    // requeue the load
-                    // issue is failed
-                    readyq_enqueue(rs);
-                    rs->issued = FALSE;
-                    /* reclaim ready list entry */
-                    RSLINK_FREE(node);
-                    continue;
-                  }
                 }
                 else
                 {
@@ -2955,6 +2977,10 @@ ruu_issue(void)
 
                 /* D-cache/D-TLB accesses occur in parallel */
                 load_lat = MAX(tlb_lat, load_lat);
+
+                /* update MISSCOUNT if D-cache/D-TLB miss*/
+                if (load_lat > cache_dl1_lat)
+                  curr_th->mcount++;
               }
 
               /* use computed cache access latency */
@@ -4283,8 +4309,10 @@ ruu_dispatch(void)
 
     /* one more instruction executed, speculative or otherwise */
     sim_total_insn++;
-    if (MD_OP_FLAGS(op) & F_CTRL)
+    if (MD_OP_FLAGS(op) & F_CTRL) {
       sim_total_branches++;
+      curr_th->brcount++;
+    }
 
     if (!curr_th->spec_mode)
     {
@@ -4439,35 +4467,75 @@ fetch_dump(FILE *stream)			/* output stream */
 }
 
 /* ICOUNT 2.8 scheduling policy: thread selection */
-/* find minimum ICOUNT thread among the threads of which ruu_fetch_issue_delay == 0 */
-/* priority : threads whose frontend misses are resolved */
+/* find two minimum ICOUNT threads among the threads */
 static void 
-select_th(int *selected_th)
+select_th_by_icount(int *selected_th)
 {
 /* int selected_th[2] = {0, 0}; */
   int min_icount[2] = {thread[0].icount, thread[0].icount};
   int th;
-  int n_select = 0;
 
   for (th=1; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-/* if (curr_th->ruu_fetch_issue_delay) continue; */
     if (curr_th->icount < min_icount[0]) {
       min_icount[1] = min_icount[0];
       selected_th[1] = selected_th[1];
       min_icount[0] = curr_th->icount;
       selected_th[0] = th;
-      n_select++;
     }
     else if (curr_th->icount <= min_icount[1]) {
       min_icount[1] = curr_th->icount;
       selected_th[1] = th;
-      n_select++;
     }
   }
-/* if (n_select < 2) */
-/* panic("There is not enough thread to fetch due to I-cache/I-TLB miss"); */
-/* return selected_th; */
+}
+
+/* BRCOUNT 2.8 scheduling policy: thread selection */
+/* find two minimum BRCOUNT threads among the threads */
+static void 
+select_th_by_brcount(int *selected_th)
+{
+/* int selected_th[2] = {0, 0}; */
+  int min_brcount[2] = {thread[0].brcount, thread[0].brcount};
+  int th;
+
+  for (th=1; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    if (curr_th->brcount < min_brcount[0]) {
+      min_brcount[1] = min_brcount[0];
+      selected_th[1] = selected_th[1];
+      min_brcount[0] = curr_th->brcount;
+      selected_th[0] = th;
+    }
+    else if (curr_th->brcount <= min_brcount[1]) {
+      min_brcount[1] = curr_th->brcount;
+      selected_th[1] = th;
+    }
+  }
+}
+
+/* MCOUNT 2.8 scheduling policy: thread selection */
+/* find two minimum MCOUNT threads among the threads */
+static void 
+select_th_by_mcount(int *selected_th)
+{
+/* int selected_th[2] = {0, 0}; */
+  int min_mcount[2] = {thread[0].mcount, thread[0].mcount};
+  int th;
+
+  for (th=1; th<nthread; ++th) {
+    struct thread_t *curr_th = &(thread[th]);
+    if (curr_th->mcount < min_mcount[0]) {
+      min_mcount[1] = min_mcount[0];
+      selected_th[1] = selected_th[1];
+      min_mcount[0] = curr_th->mcount;
+      selected_th[0] = th;
+    }
+    else if (curr_th->mcount <= min_mcount[1]) {
+      min_mcount[1] = curr_th->mcount;
+      selected_th[1] = th;
+    }
+  }
 }
 
 static int last_inst_missed = FALSE;
@@ -4491,7 +4559,16 @@ ruu_fetch(void)
   int selected_th[2] = {0, 0};
 
   /* ICOUNT 2.8 scheduling policy */
-  select_th(selected_th);
+  if (icount_en)
+    select_th_by_icount(selected_th);
+  /* BRCOUNT 2.8 scheduling policy */
+  else if (brcount_en)
+    select_th_by_brcount(selected_th);
+  /* MCOUNT 2.8 scheduling policy */
+  else if (mcount_en)
+    select_th_by_mcount(selected_th);
+  else /* default : ICOUNT 2.8 */
+    select_th_by_icount(selected_th);
 
   for (i=0;
       /* fetch up to as many instruction as the DISPATCH stage can decode */
@@ -4910,7 +4987,6 @@ sim_main(void)
     }
 
     /* call instruction fetch unit if it is not blocked */
-    /* FIXME : should consider ruu_fetch_issue_delay of each thread */
     ruu_fetch();
     
     for (th=0; th<nthread; ++th) {
@@ -4920,13 +4996,14 @@ sim_main(void)
     }
 
     /* update buffer occupancy stats */
-    /* FIXME: temporary update only for thread 0 */
-    IFQ_count += thread[0].fetch_num;
-    IFQ_fcount += ((thread[0].fetch_num == ruu_ifq_size) ? 1 : 0);
-    RUU_count += thread[0].RUU_num;
-    RUU_fcount += ((thread[0].RUU_num == RUU_size) ? 1 : 0);
-    LSQ_count += thread[0].LSQ_num;
-    LSQ_fcount += ((thread[0].LSQ_num == LSQ_size) ? 1 : 0);
+    for (th=0; th<nthread; ++th) {
+      IFQ_count += thread[th].fetch_num;
+      IFQ_fcount += ((thread[th].fetch_num == ruu_ifq_size) ? 1 : 0);
+      RUU_count += thread[th].RUU_num;
+      RUU_fcount += ((thread[th].RUU_num == RUU_size) ? 1 : 0);
+      LSQ_count += thread[th].LSQ_num;
+      LSQ_fcount += ((thread[th].LSQ_num == LSQ_size) ? 1 : 0);
+    }
 
     /* go to next cycle */
     sim_cycle++;
@@ -4934,8 +5011,7 @@ sim_main(void)
     /* finish early? */
     if (max_insts && sim_num_insn >= max_insts)
       return;
-    if (program_complete) {
+    if (program_complete) 
       return;
-    }
   }
 }
