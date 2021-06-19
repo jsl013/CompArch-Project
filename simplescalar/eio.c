@@ -213,6 +213,7 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
   int i;
   struct exo_term_t *exo;
   struct mem_pte_t *pte;
+  int th_id = regs->thread_id;
 
   myfprintf(fd, "/* ** start checkpoint @ %n... */\n\n", eio_trans_icnt);
 
@@ -250,8 +251,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
   fprintf(fd, "/* writing `%d' memory pages... */\n", (int)mem->page_count);
   exo = exo_new(ec_list,
 		exo_new(ec_integer, (exo_integer_t)mem->page_count),
-		exo_new(ec_address, (exo_integer_t)ld_brk_point),
-		exo_new(ec_address, (exo_integer_t)ld_stack_min),
+		exo_new(ec_address, (exo_integer_t)ld_brk_point[th_id]),
+		exo_new(ec_address, (exo_integer_t)ld_stack_min[th_id]),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -259,8 +260,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* text segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_text_base),
-		exo_new(ec_integer, (exo_integer_t)ld_text_size),
+		exo_new(ec_address, (exo_integer_t)ld_text_base[th_id]),
+		exo_new(ec_integer, (exo_integer_t)ld_text_size[th_id]),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -268,8 +269,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* data segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_data_base),
-		exo_new(ec_integer, (exo_integer_t)ld_data_size),
+		exo_new(ec_address, (exo_integer_t)ld_data_base[th_id]),
+		exo_new(ec_integer, (exo_integer_t)ld_data_size[th_id]),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -277,8 +278,8 @@ eio_write_chkpt(struct regs_t *regs,		/* regs to dump */
 
   fprintf(fd, "/* stack segment specifiers (base & size) */\n");
   exo = exo_new(ec_list,
-		exo_new(ec_address, (exo_integer_t)ld_stack_base),
-		exo_new(ec_integer, (exo_integer_t)ld_stack_size),
+		exo_new(ec_address, (exo_integer_t)ld_stack_base[th_id]),
+		exo_new(ec_integer, (exo_integer_t)ld_stack_size[th_id]),
 		NULL);
   exo_print(exo, fd);
   fprintf(fd, "\n\n");
@@ -312,6 +313,7 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
   int i, page_count;
   counter_t trans_icnt;
   struct exo_term_t *exo, *elt;
+  int th_id = regs->thread_id;
 
   /* read the EIO file pointer */
   exo = exo_read(fd);
@@ -381,9 +383,9 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->next->next != NULL)
     fatal("could not read EIO memory page count");
   page_count = exo->as_list.head->as_integer.val;
-  ld_brk_point = (md_addr_t)exo->as_list.head->next->as_address.val;
-  _system.brk_point = ld_brk_point;
-  ld_stack_min = (md_addr_t)exo->as_list.head->next->next->as_address.val;
+  ld_brk_point[th_id] = (md_addr_t)exo->as_list.head->next->as_address.val;
+  _system[th_id].brk_point = ld_brk_point[th_id];
+  ld_stack_min[th_id] = (md_addr_t)exo->as_list.head->next->next->as_address.val;
   exo_delete(exo);
 
   /* read text segment specifiers */
@@ -396,8 +398,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO text segment specifiers");
-  ld_text_base = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_text_size = (unsigned int)exo->as_list.head->next->as_integer.val;
+  ld_text_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
+  ld_text_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   /* read data segment specifiers */
@@ -410,8 +412,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO data segment specifiers");
-  ld_data_base = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_data_size = (unsigned int)exo->as_list.head->next->as_integer.val;
+  ld_data_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
+  ld_data_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   /* read stack segment specifiers */
@@ -424,8 +426,8 @@ eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
       || exo->as_list.head->next->ec != ec_integer
       || exo->as_list.head->next->next != NULL)
     fatal("count not read EIO stack segment specifiers");
-  ld_stack_base = (md_addr_t)exo->as_list.head->as_address.val;
-  ld_stack_size = (unsigned int)exo->as_list.head->next->as_integer.val;
+  ld_stack_base[th_id] = (md_addr_t)exo->as_list.head->as_address.val;
+  ld_stack_size[th_id] = (unsigned int)exo->as_list.head->next->as_integer.val;
   exo_delete(exo);
 
   for (i=0; i < page_count; i++)
@@ -578,6 +580,7 @@ eio_write_trace(FILE *eio_fd,			/* EIO stream file desc */
 {
   int i;
   struct exo_term_t *exo;
+  int th_id = regs->thread_id;
 
   /* write syscall register inputs ($r2..$r7) */
   input_regs = exo_new(ec_list, NULL);
@@ -606,7 +609,7 @@ eio_write_trace(FILE *eio_fd,			/* EIO stream file desc */
   output_regs = exo_new(ec_list, NULL);
   output_regs->as_list.head =
 	exo_chain(output_regs->as_list.head,
-		  exo_new(ec_address, (exo_integer_t)ld_brk_point));
+		  exo_new(ec_address, (exo_integer_t)ld_brk_point[th_id]));
   for (i=MD_FIRST_OUT_REG; i <= MD_LAST_OUT_REG; i++)
     {
       output_regs->as_list.head =
@@ -645,6 +648,7 @@ eio_read_trace(FILE *eio_fd,			/* EIO stream file desc */
   struct exo_term_t *exo, *exo_icnt, *exo_pc;
   struct exo_term_t *exo_inregs, *exo_inmem, *exo_outregs, *exo_outmem;
   struct exo_term_t *brkrec, *regrec, *memrec;
+  int th_id = regs->thread_id;
 
   /* exit() system calls get executed for real... */
   if (MD_EXIT_SYSCALL(regs))
@@ -768,7 +772,7 @@ eio_read_trace(FILE *eio_fd,			/* EIO stream file desc */
   brkrec = exo_outregs->as_list.head;
   if (!brkrec || brkrec->ec != ec_address)
     fatal("EIO trace inconsistency: missing memory breakpoint");
-  ld_brk_point = (md_addr_t)brkrec->as_address.val;
+  ld_brk_point[th_id] = (md_addr_t)brkrec->as_address.val;
 
   /* write integer register outputs */
   for (i=MD_FIRST_OUT_REG, regrec=exo_outregs->as_list.head->next;

@@ -1632,6 +1632,7 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 	    int traceable)		/* traceable system call? */
 {
   qword_t syscode = regs->regs_R[MD_REG_V0];
+  int th_id = regs->thread_id;
 
   /* fix for syscall() which uses CALL_PAL CALLSYS for making system calls */
   if (syscode == SYSCALL_OSF_SYSCALL)
@@ -1807,20 +1808,20 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 	delta = regs->regs_R[MD_REG_A0];
 //	addr = ld_brk_point + delta;
 	if (!delta)
-		addr = _system.brk_point;
+		addr = _system[th_id].brk_point;
 	else 
 		addr = delta;
 
 	if (verbose)
 	  myfprintf(stderr, "SYS_sbrk: delta: 0x%012p (%ld)\n", delta, delta);
 
-	ld_brk_point = addr;
-	_system.brk_point = addr;
-	regs->regs_R[MD_REG_V0] = ld_brk_point;
+	ld_brk_point[th_id] = addr;
+	_system[th_id].brk_point = addr;
+	regs->regs_R[MD_REG_V0] = ld_brk_point[th_id];
 	regs->regs_R[MD_REG_A3] = 0;
 
 	if (verbose)
-	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", ld_brk_point);
+	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", ld_brk_point[th_id]);
 
 	return_value = addr;
 	success = true;
@@ -1838,28 +1839,28 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 	if (verbose)
 	  myfprintf(stderr, "SYS_obreak: addr: 0x%012p\n", addr);
 
-	ld_brk_point = addr;
-	regs->regs_R[MD_REG_V0] = ld_brk_point;
+	ld_brk_point[th_id] = addr;
+	regs->regs_R[MD_REG_V0] = ld_brk_point[th_id];
 	regs->regs_R[MD_REG_A3] = 0;
 
 	if (verbose)
-	  myfprintf(stderr, "ld_brk_point: 0x%012p\n", ld_brk_point);
+	  myfprintf(stderr, "ld_brk_point[th_id]: 0x%012p\n", ld_brk_point[th_id]);
 */
 #endif
 
 
 /*	if (regs->regs_R[R_A0] == 0)
         {
-          return_value = _system.brk_point;
-          ld_brk_point = return_value;
+          return_value = _system[th_id].brk_point;
+          ld_brk_point[th_id] = return_value;
 	  success = true;
         }
         else
         {
           //ld_brk_point
-          _system.brk_point = regs->regs_R[R_A0];
-          return_value = _system.brk_point;
-          ld_brk_point = return_value;
+          _system.brk_point[th_id] = regs->regs_R[R_A0];
+          return_value = _system[th_id].brk_point;
+          ld_brk_point[th_id] = return_value;
           success = true;
         }*/
       }
@@ -2017,8 +2018,8 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
           if (addr != 0)
             warn("mmap ignorning suggested map address");
 
-          addr = _system.mmap_end;
-          _system.mmap_end += length;
+          addr = _system[th_id].mmap_end;
+          _system[th_id].mmap_end += length;
 
           if (!(flags & 0x10))
             warn("mmapping fd %d.  this is bad if not /dev/zero", fd); 
@@ -2328,9 +2329,9 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
         uint64_t flags = regs->regs_R[R_A3];
 
 	if (new_length > old_length) {
-		if ((addr + old_length) == _system.mmap_end) {
+		if ((addr + old_length) == _system[th_id].mmap_end) {
 			unsigned long int diff = new_length - old_length;
-			_system.mmap_end += diff;
+			_system[th_id].mmap_end += diff;
 			return_value = addr;
 			success = true;
 			return;
@@ -2341,9 +2342,9 @@ sys_syscall(struct regs_t *regs,	/* registers to access */
 		 	mem_bcopy(mem_fn, mem, Read,
 		  		/*buf*/addr, buf, /*nread*/old_length);
 		 	mem_bcopy(mem_fn, mem, Write,
-		  		/*buf*/_system.mmap_end, buf, /*nread*/old_length);
-			return_value = _system.mmap_end;
-			_system.mmap_end += new_length;			
+		  		/*buf*/_system[th_id].mmap_end, buf, /*nread*/old_length);
+			return_value = _system[th_id].mmap_end;
+			_system[th_id].mmap_end += new_length;			
 			//warn("can't remap here and MREMAP_MAYMOVE flag not set\n");
 			success = true;
         		free(buf);

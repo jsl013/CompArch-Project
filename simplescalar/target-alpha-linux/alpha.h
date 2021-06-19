@@ -560,9 +560,9 @@ word_t md_xor_regs(struct regs_t *regs);
 /* non-zero for a valid address, used to determine if speculative accesses
    should access the DL1 data cache */
 #define MD_VALID_ADDR(ADDR)						\
-  (((ADDR) >= ld_text_base && (ADDR) < (ld_text_base + ld_text_size))	\
-   || ((ADDR) >= ld_data_base && (ADDR) < ld_brk_point)			\
-   || ((ADDR) >= (ld_stack_base - 16*1024*1024) && (ADDR) < ld_stack_base))
+  (((ADDR) >= ld_text_base[th_id] && (ADDR) < (ld_text_base[th_id] + ld_text_size[th_id]))	\
+   || ((ADDR) >= ld_data_base[th_id] && (ADDR) < ld_brk_point[th_id])			\
+   || ((ADDR) >= (ld_stack_base[th_id] - 16*1024*1024) && (ADDR) < ld_stack_base[th_id]))
 
 /*
  * configure branch predictors

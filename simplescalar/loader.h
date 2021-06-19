@@ -93,50 +93,49 @@
  * has to scan memory for the end of the string.
  */
 
-/*
- * program segment ranges, valid after calling ld_load_prog()
- */
-extern AlphaSystemState _system;
+#define MAX_TH 16
+
+extern AlphaSystemState _system[MAX_TH];
 
 /* program text (code) segment base */
-extern md_addr_t ld_text_base;
+extern md_addr_t ld_text_base[MAX_TH];
 
 /* program text (code) size in bytes */
-extern unsigned int ld_text_size;
+extern unsigned int ld_text_size[MAX_TH];
 
 /* program initialized data segment base */
-extern md_addr_t ld_data_base;
+extern md_addr_t ld_data_base[MAX_TH];
 
 /* program initialized ".data" and uninitialized ".bss" size in bytes */
-extern unsigned int ld_data_size;
+extern unsigned int ld_data_size[MAX_TH];
 
 /* top of the data segment */
-extern md_addr_t ld_brk_point;
+extern md_addr_t ld_brk_point[MAX_TH];
 
 /* program stack segment base (highest address in stack) */
-extern md_addr_t ld_stack_base;
+extern md_addr_t ld_stack_base[MAX_TH];
 
 /* program initial stack size */
-extern unsigned int ld_stack_size;
+extern unsigned int ld_stack_size[MAX_TH];
 
 /* lowest address accessed on the stack */
-extern md_addr_t ld_stack_min;
+extern md_addr_t ld_stack_min[MAX_TH];
 
 /* program file name */
-extern char *ld_prog_fname;
+extern char *ld_prog_fname[MAX_TH];
 
 /* program entry point (initial PC) */
-extern md_addr_t ld_prog_entry;
+extern md_addr_t ld_prog_entry[MAX_TH];
 
 /* program environment base address address */
-extern md_addr_t ld_environ_base;
+extern md_addr_t ld_environ_base[MAX_TH];
 
 /* target executable endian-ness, non-zero if big endian */
-extern int ld_target_big_endian;
+extern int ld_target_big_endian[MAX_TH];
 
 /* register simulator-specific statistics */
 void
-ld_reg_stats(struct stat_sdb_t *sdb);	/* stats data base */
+ld_reg_stats(struct stat_sdb_t *sdb, int th_id);	/* stats data base */
 
 /* load program text and initialized data into simulated virtual memory
    space and initialize program segment range variables */
@@ -146,6 +145,7 @@ ld_load_prog(char *fname,		/* program to load */
 	     char **envp,		/* simulated program environment */
 	     struct regs_t *regs,	/* registers to initialize for load */
 	     struct mem_t *mem,		/* memory space to load prog into */
-	     int zero_bss_segs);	/* zero uninit data segment? */
+	     int zero_bss_segs,	/* zero uninit data segment? */
+       int th_id);
 
 #endif /* LOADER_H */

@@ -232,6 +232,16 @@ sym_loadsyms(char *fname,	/* file name containing symbols */
   char *strtab = NULL;
   struct ecoff_EXTR *extr;
 #endif /* BFD_LOADER */
+  int th_id = -1;
+  int th;
+  for (th=0; th<MAX_TH; th++) {
+    if (!strcmp(fname, ld_prog_fname[th])) {
+      th_id = th;
+      break;
+    }
+  }
+  if (th_id == -1) 
+    panic("[sym_loadsyms] There is no file containing symbols");
 
   if (syms_loaded)
     {
@@ -606,14 +616,14 @@ sym_loadsyms(char *fname,	/* file name containing symbols */
       sym_textsyms[i]->size =
 	(i != (sym_ntextsyms - 1)
 	 ? (sym_textsyms[i+1]->addr - sym_textsyms[i]->addr)
-	 : ((ld_text_base + ld_text_size) - sym_textsyms[i]->addr));
+	 : ((ld_text_base[th_id] + ld_text_size[th_id]) - sym_textsyms[i]->addr));
     }
   for (i=0; i<sym_ndatasyms; i++)
     {
       sym_datasyms[i]->size =
 	(i != (sym_ndatasyms - 1)
 	 ? (sym_datasyms[i+1]->addr - sym_datasyms[i]->addr)
-	 : ((ld_data_base + ld_data_size) - sym_datasyms[i]->addr));
+	 : ((ld_data_base[th_id] + ld_data_size[th_id]) - sym_datasyms[i]->addr));
     }
 
   /* symbols are now available for use */

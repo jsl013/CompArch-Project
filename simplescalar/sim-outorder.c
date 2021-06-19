@@ -134,6 +134,8 @@ struct thread_t {
   struct mem_t *mem;
 
   unsigned ruu_fetch_issue_delay;
+  
+  int spec_mode; 
 
   int icount; /* I-COUNT scheduling policy counter */
   int brcount; /* BR-COUNT scheduling policy counter */
@@ -293,7 +295,7 @@ static char *pcstat_vars[MAX_PCSTAT_VARS];
 /* convert 64-bit inst text addresses to 32-bit inst equivalents */
 #ifdef TARGET_PISA
 #define IACOMPRESS(A)							\
-  (compress_icache_addrs ? ((((A) - ld_text_base) >> 1) + ld_text_base) : (A))
+  (compress_icache_addrs ? ((((A) - ld_text_base[th_id]) >> 1) + ld_text_base[th_id]) : (A))
 #define ISCOMPRESS(SZ)							\
   (compress_icache_addrs ? ((SZ) >> 1) : (SZ))
 #else /* !TARGET_PISA */
@@ -432,7 +434,7 @@ static unsigned int ptrace_seq = 0;
    instructions down the wrong path, thus state recovery will eventually have
    to occur that resets processor register and memory state back to the last
    precise state */
-static int spec_mode = FALSE;
+/* static int spec_mode = FALSE; */
 
 /* cycles until fetch issue resumes */
 /* static unsigned ruu_fetch_issue_delay = 0; */
@@ -1457,8 +1459,8 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
         /* format */"0x%lx %u %.2f",
         /* print fn */NULL);
   }
-  ld_reg_stats(sdb);
   for (i=0; i<nthread; ++i) {
+    ld_reg_stats(sdb, i);
     mem_reg_stats(thread[i].mem, sdb);
   }
 }
@@ -1542,15 +1544,27 @@ sim_load_prog(char *fname,		/* program to load */
     int argc, char **argv,	/* program arguments */
     char **envp)		/* program environment */
 {
+  /* int th, i; */
   int th;
   /* load program text and data, set up environment, memory, and regs */
   int *th_argc = find_th_argv(argc, argv);
+  /* char **th_argv; */
   int argv_start = 0;
 
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-    ld_load_prog(fname, th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE);
+    /* th_argv = calloc(th_argc[th], sizeof(char *)); */
+    /* for (i=0; i<th_argc[th]; ++i) { */
+    /* th_argv[i] = calloc(strlen(argv[argv_start+i]), sizeof(char)); */
+    /* th_argv[i] = argv[argv_start+i]; */
+    /* } */
+    /* ld_load_prog(th_argv[0], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE, th); */
+    ld_load_prog(argv[argv_start], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE, th);
     argv_start += th_argc[th]+1;
+    /* for (i=0; i<th_argc[th]; ++i) { */
+    /* free(th_argv[i]); */
+    /* } */
+    /* free(th_argv); */
   }
 
   /* initialize here, so symbols can be loaded */
@@ -2220,7 +2234,7 @@ static struct CV_link CVLINK_NULL = { NULL, 0 };
     : curr_th->create_vector_rt[N])
 
 /* set a create vector entry */
-#define SET_CREATE_VECTOR(N, L) (spec_mode                              \
+#define SET_CREATE_VECTOR(N, L) (curr_th->spec_mode                              \
     ? (BITMAP_SET(curr_th->use_spec_cv, CV_BMAP_SZ, (N)),\
       curr_th->spec_create_vector[N] = (L))        \
       : (curr_th->create_vector[N] = (L)))
@@ -2816,6 +2830,7 @@ ruu_issue(void)
     {
       struct RUU_station *rs = RSLINK_RS(node);
       struct thread_t *curr_th = &(thread[rs->thread_id]);
+      int th_id = rs->thread_id;
 
       /* issue operation, both reg and mem deps have been satisfied */
       if (!OPERANDS_READY(rs) || !rs->queued
@@ -2902,7 +2917,7 @@ ruu_issue(void)
               {
                 int valid_addr = MD_VALID_ADDR(rs->addr);
 
-                if (!spec_mode && !valid_addr)
+                if (!curr_th->spec_mode && !valid_addr)
                   sim_invalid_addrs++;
 
                 /* no! go to the data cache if addr is valid */
@@ -3066,11 +3081,12 @@ rspec_dump(FILE *stream)			/* output stream */
 
   fprintf(stream, "** speculative register contents **\n");
 
-  fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
-
   /* dump speculative integer regs */
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
+
+    fprintf(stream, "spec_mode: %s\n", curr_th->spec_mode ? "t" : "f");
+
     for (i=0; i < MD_NUM_IREGS; i++)
     {
       if (BITMAP_SET_P(curr_th->use_spec_R, R_BMAP_SZ, i))
@@ -3154,11 +3170,11 @@ tracer_recover(int thread_id)
   struct thread_t *curr_th = &(thread[thread_id]);
 
   /* better be in mis-speculative trace generation mode */
-  if (!spec_mode)
+  if (!curr_th->spec_mode)
     panic("cannot recover unless in speculative mode");
 
   /* reset to non-speculative trace generation mode */
-  spec_mode = FALSE;
+  curr_th->spec_mode = FALSE;
 
   /* reset copied-on-write register bitmasks back to non-speculative state */
   BITMAP_CLEAR_MAP(curr_th->use_spec_R, R_BMAP_SZ);
@@ -3209,7 +3225,7 @@ tracer_init(void)
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
     /* initially in non-speculative mode */
-    spec_mode = FALSE;
+    curr_th->spec_mode = FALSE;
 
     /* register state is from non-speculative state buffers */
     BITMAP_CLEAR_MAP(curr_th->use_spec_R, R_BMAP_SZ);
@@ -3245,6 +3261,7 @@ spec_mem_access(struct mem_t *mem,		/* memory space to access */
 {
   int i, index;
   struct spec_mem_ent *ent, *prev;
+  int th_id = mem->thread_id;
 
   /* FIXME: partially overlapping writes are not combined... */
   /* FIXME: partially overlapping reads are not handled correctly... */
@@ -3260,7 +3277,7 @@ spec_mem_access(struct mem_t *mem,		/* memory space to access */
   }
 
   /* check permissions */
-  if (!((addr >= ld_text_base && addr < (ld_text_base+ld_text_size)
+  if (!((addr >= ld_text_base[th_id] && addr < (ld_text_base[th_id]+ld_text_size[th_id])
           && cmd == Read)
         || MD_VALID_ADDR(addr)))
   {
@@ -3417,13 +3434,14 @@ mspec_dump(FILE *stream)			/* output stream */
 {
   int i;
   struct spec_mem_ent *ent;
+  struct thread_t *curr_th = &(thread[0]);
 
   if (!stream)
     stream = stderr;
 
   fprintf(stream, "** speculative memory contents **\n");
 
-  fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
+  fprintf(stream, "spec_mode: %s\n", curr_th->spec_mode ? "t" : "f");
 
   for (i=0; i<STORE_HASH_SIZE; i++)
   {
@@ -3447,13 +3465,14 @@ simoo_mem_obj(struct mem_t *mem,		/* memory space to access */
     int nbytes)			/* size of access */
 {
   enum mem_cmd cmd;
+  struct thread_t *curr_th = &(thread[mem->thread_id]);
 
   if (!is_write)
     cmd = Read;
   else
     cmd = Write;
 
-  if (spec_mode)
+  if (curr_th->spec_mode)
     spec_mem_access(mem, cmd, addr, p, nbytes);
   else
     mem_access(mem, cmd, addr, p, nbytes);
@@ -3601,7 +3620,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define GPR(N)                  (BITMAP_SET_P(curr_th->use_spec_R, R_BMAP_SZ, (N))\
     ? curr_th->spec_regs.regs_R[N]                       \
     : curr_th->regs.regs_R[N])
-#define SET_GPR(N,EXPR)         (spec_mode				\
+#define SET_GPR(N,EXPR)         (curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_R[N] = (EXPR)),		\
       BITMAP_SET(curr_th->use_spec_R, R_BMAP_SZ, (N)),\
       curr_th->spec_regs.regs_R[N])			\
@@ -3615,7 +3634,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPR_L(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
     ? curr_th->spec_regs.regs_F.l[(N)]                   \
     : curr_th->regs.regs_F.l[(N)])
-#define SET_FPR_L(N,EXPR)       (spec_mode				\
+#define SET_FPR_L(N,EXPR)       (curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_F.l[(N)] = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
       curr_th->spec_regs.regs_F.l[(N)])			\
@@ -3623,7 +3642,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPR_F(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
     ? curr_th->spec_regs.regs_F.f[(N)]                   \
     : curr_th->regs.regs_F.f[(N)])
-#define SET_FPR_F(N,EXPR)       (spec_mode				\
+#define SET_FPR_F(N,EXPR)       (curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_F.f[(N)] = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
       curr_th->spec_regs.regs_F.f[(N)])			\
@@ -3631,7 +3650,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPR_D(N)                (BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, ((N)&~1))\
     ? curr_th->spec_regs.regs_F.d[(N) >> 1]              \
     : curr_th->regs.regs_F.d[(N) >> 1])
-#define SET_FPR_D(N,EXPR)       (spec_mode				\
+#define SET_FPR_D(N,EXPR)       (curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_F.d[(N) >> 1] = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ,((N)&~1)),\
       curr_th->spec_regs.regs_F.d[(N) >> 1])		\
@@ -3643,7 +3662,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define HI			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ, /*hi*/0)\
     ? curr_th->spec_regs.regs_C.hi			\
     : curr_th->regs.regs_C.hi)
-#define SET_HI(EXPR)		(spec_mode				\
+#define SET_HI(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.hi = (EXPR)),		\
       BITMAP_SET(curr_th->use_spec_C, C_BMAP_SZ,/*hi*/0),\
       curr_th->spec_regs.regs_C.hi)			\
@@ -3651,7 +3670,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define LO			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ, /*lo*/1)\
     ? curr_th->spec_regs.regs_C.lo			\
     : curr_th->regs.regs_C.lo)
-#define SET_LO(EXPR)		(spec_mode				\
+#define SET_LO(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.lo = (EXPR)),		\
       BITMAP_SET(curr_th->use_spec_C, C_BMAP_SZ,/*lo*/1),\
       curr_th->spec_regs.regs_C.lo)			\
@@ -3659,7 +3678,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FCC			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fcc*/2)\
     ? curr_th->spec_regs.regs_C.fcc			\
     : curr_th->regs.regs_C.fcc)
-#define SET_FCC(EXPR)		(spec_mode				\
+#define SET_FCC(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.fcc = (EXPR)),		\
       BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fcc*/2),\
       curr_th->spec_regs.regs_C.fcc)			\
@@ -3673,7 +3692,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPR_Q(N)		(BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, (N))\
     ? curr_th->spec_regs.regs_F.q[(N)]                   \
     : curr_th->regs.regs_F.q[(N)])
-#define SET_FPR_Q(N,EXPR)	(spec_mode				\
+#define SET_FPR_Q(N,EXPR)	(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_F.q[(N)] = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ, (N)),\
       curr_th->spec_regs.regs_F.q[(N)])			\
@@ -3681,7 +3700,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPR(N)			(BITMAP_SET_P(curr_th->use_spec_F, F_BMAP_SZ, (N))\
     ? curr_th->spec_regs.regs_F.d[(N)]			\
     : curr_th->regs.regs_F.d[(N)])
-#define SET_FPR(N,EXPR)		(spec_mode				\
+#define SET_FPR(N,EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_F.d[(N)] = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_F,F_BMAP_SZ, (N)),\
       curr_th->spec_regs.regs_F.d[(N)])			\
@@ -3693,7 +3712,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FPCR			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fpcr*/0)\
     ? curr_th->spec_regs.regs_C.fpcr			\
     : curr_th->regs.regs_C.fpcr)
-#define SET_FPCR(EXPR)		(spec_mode				\
+#define SET_FPCR(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.fpcr = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fpcr*/0),\
       curr_th->spec_regs.regs_C.fpcr)			\
@@ -3701,7 +3720,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define UNIQ			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*uniq*/1)\
     ? curr_th->spec_regs.regs_C.uniq			\
     : curr_th->regs.regs_C.uniq)
-#define SET_UNIQ(EXPR)		(spec_mode				\
+#define SET_UNIQ(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.uniq = (EXPR)),	\
       BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*uniq*/1),\
       curr_th->spec_regs.regs_C.uniq)			\
@@ -3709,7 +3728,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 #define FCC			(BITMAP_SET_P(curr_th->use_spec_C, C_BMAP_SZ,/*fcc*/2)\
     ? curr_th->spec_regs.regs_C.fcc			\
     : curr_th->regs.regs_C.fcc)
-#define SET_FCC(EXPR)		(spec_mode				\
+#define SET_FCC(EXPR)		(curr_th->spec_mode				\
     ? ((curr_th->spec_regs.regs_C.fcc = (EXPR)),		\
       BITMAP_SET(curr_th->use_spec_C,C_BMAP_SZ,/*fcc*/1),\
       curr_th->spec_regs.regs_C.fcc)			\
@@ -3724,7 +3743,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
    tracer_recover() for details on this process */
 #define __READ_SPECMEM(SRC, SRC_V, FAULT)				\
   (addr = (SRC),							\
-   (spec_mode								\
+   (curr_th->spec_mode								\
     ? ((FAULT) = spec_mem_access(curr_th->mem, Read, addr, &SRC_V, sizeof(SRC_V)))\
     : ((FAULT) = mem_access(curr_th->mem, Read, addr, &SRC_V, sizeof(SRC_V)))),	\
     SRC_V)
@@ -3743,7 +3762,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 
 #define __WRITE_SPECMEM(SRC, DST, DST_V, FAULT)				\
   (DST_V = (SRC), addr = (DST),						\
-   (spec_mode								\
+   (curr_th->spec_mode								\
     ? ((FAULT) = spec_mem_access(curr_th->mem, Write, addr, &DST_V, sizeof(DST_V)))\
     : ((FAULT) = mem_access(curr_th->mem, Write, addr, &DST_V, sizeof(DST_V)))))
 
@@ -3761,7 +3780,7 @@ ruu_install_odep(struct RUU_station *rs,	/* creating RUU station */
 /* system call handler macro */
 #define SYSCALL(INST)							\
   (/* only execute system calls in non-speculative mode */		\
-   (spec_mode ? panic("speculative syscall") : (void) 0),		\
+   (curr_th->spec_mode ? panic("speculative syscall") : (void) 0),		\
    sys_syscall(&curr_th->regs, mem_access, curr_th->mem, INST, TRUE))
 
 /* default register state accessor, used by DLite */
@@ -3927,7 +3946,7 @@ ruu_dispatch(void)
       /* all threads done? */
       && try_th < nthread
       /* on an acceptable trace path */
-      && (ruu_include_spec || !spec_mode))
+      && (ruu_include_spec || !curr_th->spec_mode))
   {
     curr_th = &(thread[th_id]);
 
@@ -3972,7 +3991,7 @@ ruu_dispatch(void)
 
       /* else, syscall is only instruction in the machine, at this
          point we should not be in (mis-)speculative mode */
-      if (spec_mode)
+      if (curr_th->spec_mode)
         panic("drained and speculative");
     }
 
@@ -3982,7 +4001,7 @@ ruu_dispatch(void)
     curr_th->regs.regs_F.d[MD_REG_ZERO] = 0.0; curr_th->spec_regs.regs_F.d[MD_REG_ZERO] = 0.0;
 #endif /* TARGET_ALPHA */
 
-    if (!spec_mode)
+    if (!curr_th->spec_mode)
     {
       /* one more non-speculative instruction executed */
       sim_num_insn++;
@@ -4022,7 +4041,7 @@ ruu_dispatch(void)
          the mis-speculated instruction paths */
 #define DECLARE_FAULT(FAULT)						\
       {								\
-        if (!spec_mode)						\
+        if (!curr_th->spec_mode)						\
         fault = (FAULT);						\
         /* else, spec fault, ignore it, always terminate exec... */	\
         break;							\
@@ -4039,7 +4058,7 @@ ruu_dispatch(void)
     /* operation sets next PC */
 
     /* print retirement trace if in verbose mode */
-    if (!spec_mode && verbose)
+    if (!curr_th->spec_mode && verbose)
     {
       myfprintf(stderr, "++ %10n [xor: 0x%08x] {%d} @ 0x%08p: ",
           sim_num_insn, md_xor_regs(&curr_th->regs),
@@ -4057,7 +4076,7 @@ ruu_dispatch(void)
     if (MD_OP_FLAGS(op) & F_MEM)
     {
       sim_total_refs++;
-      if (!spec_mode)
+      if (!curr_th->spec_mode)
         sim_num_refs++;
 
       if (MD_OP_FLAGS(op) & F_STORE)
@@ -4065,7 +4084,7 @@ ruu_dispatch(void)
       else
       {
         sim_total_loads++;
-        if (!spec_mode)
+        if (!curr_th->spec_mode)
           sim_num_loads++;
       }
     }
@@ -4143,7 +4162,7 @@ ruu_dispatch(void)
       rs->recover_inst = FALSE;
       rs->dir_update = *dir_update_ptr;
       rs->stack_recover_idx = stack_recover_idx;
-      rs->spec_mode = spec_mode;
+      rs->spec_mode = curr_th->spec_mode;
       rs->addr = 0;
       /* rs->tag is already set */
       rs->seq = ++inst_seq;
@@ -4171,7 +4190,7 @@ ruu_dispatch(void)
         lsq->dir_update.pdir1 = lsq->dir_update.pdir2 = NULL;
         lsq->dir_update.pmeta = NULL;
         lsq->stack_recover_idx = 0;
-        lsq->spec_mode = spec_mode;
+        lsq->spec_mode = curr_th->spec_mode;
         lsq->addr = addr;
         /* lsq->tag is already set */
         lsq->seq = ++inst_seq;
@@ -4273,7 +4292,7 @@ ruu_dispatch(void)
     if (MD_OP_FLAGS(op) & F_CTRL)
       sim_total_branches++;
 
-    if (!spec_mode)
+    if (!curr_th->spec_mode)
     {
 #if 0 /* moved above for EIO trace file support */
       /* one more non-speculative instruction executed */
@@ -4304,7 +4323,7 @@ ruu_dispatch(void)
       if (curr_th->pred_PC != curr_th->regs.regs_NPC && !fetch_redirected)
       {
         /* entering mis-speculation mode, indicate this and save PC */
-        spec_mode = TRUE;
+        curr_th->spec_mode = TRUE;
         rs->recover_inst = TRUE;
         curr_th->recover_PC = curr_th->regs.regs_NPC;
       }
@@ -4398,7 +4417,7 @@ fetch_dump(FILE *stream)			/* output stream */
     struct thread_t *curr_th = &(thread[th]);
     fprintf(stream, "** fetch stage state of thread %d **\n", th);
 
-    fprintf(stream, "spec_mode: %s\n", spec_mode ? "t" : "f");
+    fprintf(stream, "spec_mode: %s\n", curr_th->spec_mode ? "t" : "f");
     myfprintf(stream, "pred_PC: 0x%08p, recover_PC: 0x%08p\n",
         curr_th->pred_PC, curr_th->recover_PC);
     myfprintf(stream, "fetch_regs_PC: 0x%08p, fetch_pred_PC: 0x%08p\n",
@@ -4502,8 +4521,8 @@ ruu_fetch(void)
     curr_th->fetch_regs_PC = curr_th->fetch_pred_PC;
 
     /* is this a bogus text address? (can happen on mis-spec path) */
-    if (1 || ld_text_base <= curr_th->fetch_regs_PC
-        && curr_th->fetch_regs_PC < (ld_text_base+ld_text_size)
+    if (1 || ld_text_base[th_id] <= curr_th->fetch_regs_PC
+        && curr_th->fetch_regs_PC < (ld_text_base[th_id]+ld_text_size[th_id])
         && !(curr_th->fetch_regs_PC & (sizeof(md_inst_t)-1)))
     {
       /* read instruction from memory */
@@ -4728,7 +4747,7 @@ sim_main(void)
   int th;
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-    curr_th->regs.regs_PC = ld_prog_entry;
+    curr_th->regs.regs_PC = ld_prog_entry[th];
     curr_th->regs.regs_NPC = curr_th->regs.regs_PC + sizeof(md_inst_t);
 
     /* check for DLite debugger entry condition */

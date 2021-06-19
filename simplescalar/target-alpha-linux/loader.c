@@ -72,83 +72,83 @@
 /* amount of tail padding added to all loaded text segments */
 #define TEXT_TAIL_PADDING 0 /* was: 128 */
 
-AlphaSystemState _system;
+AlphaSystemState _system[MAX_TH];
 
 /* program text (code) segment base */
-md_addr_t ld_text_base = 0;
+md_addr_t ld_text_base[MAX_TH] = {0};
 
 /* program text size in bytes */
-unsigned int ld_text_size = 0;
+unsigned int ld_text_size[MAX_TH] = {0};
 
 /* program bss segment base */
-md_addr_t ld_bss_base = 0;
+md_addr_t ld_bss_base[MAX_TH] = {0};
 
 /* program bss size in bytes */
-unsigned int ld_bss_size = 0;
+unsigned int ld_bss_size[MAX_TH] = {0};
 
 
 /* program initialized data segment base */
-md_addr_t ld_data_base = 0;
+md_addr_t ld_data_base[MAX_TH] = {0};
 
 /* top of the data segment */
-md_addr_t ld_brk_point = 0;
+md_addr_t ld_brk_point[MAX_TH] = {0};
 
 uint64_t addr, zero=0;
 
 /* program initialized ".data" and uninitialized ".bss" size in bytes */
-unsigned int ld_data_size = 0;
+unsigned int ld_data_size[MAX_TH] = {0};
 
 /* program stack segment base (highest address in stack) */
-md_addr_t ld_stack_base = 0;
+md_addr_t ld_stack_base[MAX_TH] = {0};
 
 /* program initial stack size */
-unsigned int ld_stack_size = 0;
+unsigned int ld_stack_size[MAX_TH] = {0};
 
 /* lowest address accessed on the stack */
-md_addr_t ld_stack_min = -1;
+md_addr_t ld_stack_min[MAX_TH] = {-1};
 
 /* program file name */
-char *ld_prog_fname = NULL;
+char *ld_prog_fname[MAX_TH] = {NULL};
 
 /* program entry point (initial PC) */
-md_addr_t ld_prog_entry = 0;
+md_addr_t ld_prog_entry[MAX_TH] = {0};
 
 /* program environment base address address */
-md_addr_t ld_environ_base = 0;
+md_addr_t ld_environ_base[MAX_TH] = {0};
 
 /* target executable endian-ness, non-zero if big endian */
-int ld_target_big_endian;
+int ld_target_big_endian[MAX_TH];
 
 
-void initialize_system_state()
+void initialize_system_state(int th_id)
 {
   // this function is called by the loader to initialize the system state,
   // which is a struct containing variables needed by certain syscalls.
-  _system.brk_point = (ld_bss_base + ld_bss_size + 0xffffLL) & 0xffffffffffff0000LL;
+  _system[th_id].brk_point = (ld_bss_base[th_id] + ld_bss_size[th_id] + 0xffffLL) & 0xffffffffffff0000LL;
   
-  _system.mmap_end = 0x10000; 
+  _system[th_id].mmap_end = 0x10000; 
 }
 
 
 /* register simulator-specific statistics */
 void
-ld_reg_stats(struct stat_sdb_t *sdb)	/* stats data base */
+ld_reg_stats(struct stat_sdb_t *sdb, int th_id)	/* stats data base */
 {
   stat_reg_addr(sdb, "ld_text_base",
 		"program text (code) segment base",
-		&ld_text_base, ld_text_base, "0x%010p");
+		&ld_text_base[th_id], ld_text_base[th_id], "0x%010p");
   stat_reg_uint(sdb, "ld_text_size",
 		"program text (code) size in bytes",
-		&ld_text_size, ld_text_size, NULL);
+		&ld_text_size[th_id], ld_text_size[th_id], NULL);
   stat_reg_addr(sdb, "ld_data_base",
 		"program initialized data segment base",
-		&ld_data_base, ld_data_base, "0x%010p");
+		&ld_data_base[th_id], ld_data_base[th_id], "0x%010p");
   stat_reg_uint(sdb, "ld_data_size",
 		"program init'ed `.data' and uninit'ed `.bss' size in bytes",
-		&ld_data_size, ld_data_size, NULL);
+		&ld_data_size[th_id], ld_data_size[th_id], NULL);
   stat_reg_addr(sdb, "ld_stack_base",
 		"program stack segment base (highest address in stack)",
-		&ld_stack_base, ld_stack_base, "0x%010p");
+		&ld_stack_base[th_id], ld_stack_base[th_id], "0x%010p");
 #if 0 /* FIXME: broken... */
   stat_reg_addr(sdb, "ld_stack_min",
 		"program stack segment lowest address",
@@ -156,16 +156,16 @@ ld_reg_stats(struct stat_sdb_t *sdb)	/* stats data base */
 #endif
   stat_reg_uint(sdb, "ld_stack_size",
 		"program initial stack size",
-		&ld_stack_size, ld_stack_size, NULL);
+		&ld_stack_size[th_id], ld_stack_size[th_id], NULL);
   stat_reg_addr(sdb, "ld_prog_entry",
 		"program entry point (initial PC)",
-		&ld_prog_entry, ld_prog_entry, "0x%010p");
+		&ld_prog_entry[th_id], ld_prog_entry[th_id], "0x%010p");
   stat_reg_addr(sdb, "ld_environ_base",
 		"program environment base address address",
-		&ld_environ_base, ld_environ_base, "0x%010p");
+		&ld_environ_base[th_id], ld_environ_base[th_id], "0x%010p");
   stat_reg_int(sdb, "ld_target_big_endian",
 	       "target executable endian-ness, non-zero if big endian",
-	       &ld_target_big_endian, ld_target_big_endian, NULL);
+	       &ld_target_big_endian[th_id], ld_target_big_endian[th_id], NULL);
 }
 
 
@@ -177,7 +177,8 @@ ld_load_prog(char *fname,		/* program to load */
 	     char **envp,		/* simulated program environment */
 	     struct regs_t *regs,	/* registers to initialize for load */
 	     struct mem_t *mem,		/* memory space to load prog into */
-	     int zero_bss_segs)		/* zero uninit data segment? */
+	     int zero_bss_segs,		/* zero uninit data segment? */
+       int th_id)         /* thread ID of program*/
 {
   int i;
   qword_t temp;
@@ -229,8 +230,8 @@ ld_load_prog(char *fname,		/* program to load */
 	}
 
       /* computed state... */
-      ld_environ_base = regs->regs_R[MD_REG_SP];
-      ld_prog_entry = regs->regs_PC;
+      ld_environ_base[th_id] = regs->regs_R[MD_REG_SP];
+      ld_prog_entry[th_id] = regs->regs_PC;
 
       /* fini... */
       return;
@@ -261,12 +262,12 @@ ld_load_prog(char *fname,		/* program to load */
 
     /* set up a local stack pointer, this is where the argv and envp
        data is written into program memory */
-    ld_stack_base = MD_STACK_BASE;
+    ld_stack_base[th_id] = MD_STACK_BASE;
     sp = ROUND_DOWN(MD_STACK_BASE - MD_MAX_ENVIRON, sizeof(MD_DOUBLE_TYPE));
-    ld_stack_size = ld_stack_base - sp;
+    ld_stack_size[th_id] = ld_stack_base[th_id] - sp;
 
     /* initial stack pointer value */
-    ld_environ_base = sp;
+    ld_environ_base[th_id] = sp;
 
     /* load the program into memory, try both endians */
     if (!(abfd = bfd_openr(argv[0], "ss-coff-big")))
@@ -347,7 +348,7 @@ ld_load_prog(char *fname,		/* program to load */
 	if (!strcmp(bfd_section_name(abfd, sect), ".text"))
 	  {
 	    /* .text section processing */
-	    ld_text_size =
+	    ld_text_size[th_id] =
 	      ((bfd_section_vma(abfd, sect) + bfd_section_size(abfd, sect))
 	       - MD_TEXT_BASE)
 		+ /* for speculative fetches/decodes */TEXT_TAIL_PADDING;
@@ -383,10 +384,10 @@ ld_load_prog(char *fname,		/* program to load */
       }
 
     /* compute data segment size from data break point */
-    ld_text_base = MD_TEXT_BASE;
-    ld_data_base = MD_DATA_BASE;
-    ld_prog_entry = bfd_get_start_address(abfd);
-    ld_data_size = data_break - ld_data_base;
+    ld_text_base[th_id] = MD_TEXT_BASE;
+    ld_data_base[th_id] = MD_DATA_BASE;
+    ld_prog_entry[th_id] = bfd_get_start_address(abfd);
+    ld_data_size[th_id] = data_break - ld_data_base[th_id];
 
     /* done with the executable, close it */
     if (!bfd_close(abfd))
@@ -408,7 +409,7 @@ ld_load_prog(char *fname,		/* program to load */
     char *p;
 
     /* record profile file name */
-    ld_prog_fname = argv[0];
+    ld_prog_fname[th_id] = argv[0];
 
     /* load the program into memory, try both endians */
 #if defined(__CYGWIN32__) || defined(_MSC_VER)
@@ -526,9 +527,9 @@ ld_load_prog(char *fname,		/* program to load */
     fatal("ArchLib: error parsing %s", argv[0]);
     
   // initialize text, data, and bss sections
-  ld_prog_entry = fhdr.e_entry;
-  ld_text_size = ld_text_base = 0;
-  ld_data_size = ld_data_base = 0;
+  ld_prog_entry[th_id] = fhdr.e_entry;
+  ld_text_size[th_id] = ld_text_base[th_id] = 0;
+  ld_data_size[th_id] = ld_data_base[th_id] = 0;
 
   // pull out program map from section headers
   for (i = 0; i < fhdr.e_shnum; i++)
@@ -542,22 +543,22 @@ ld_load_prog(char *fname,		/* program to load */
     // store size and base of text segment
     if (!strcmp(".text", shdr_strs + shdr.sh_name))
     {
-      ld_text_size = MD_SWAPQ(shdr.sh_size);
-      ld_text_base = MD_SWAPQ(shdr.sh_addr);
+      ld_text_size[th_id] = MD_SWAPQ(shdr.sh_size);
+      ld_text_base[th_id] = MD_SWAPQ(shdr.sh_addr);
 //      ld_prog_entry = shdr.sh_addr;
     }
     // store size and base of data segment
     if (!strcmp(".data", shdr_strs + shdr.sh_name))
     {
-      ld_data_size = MD_SWAPQ(shdr.sh_size);
-      ld_data_base = MD_SWAPQ(shdr.sh_addr);
+      ld_data_size[th_id] = MD_SWAPQ(shdr.sh_size);
+      ld_data_base[th_id] = MD_SWAPQ(shdr.sh_addr);
     }
     // store size and base of bss segment
     if (!strcmp(".bss", shdr_strs + shdr.sh_name))
     {
 //      ld_prog_entry = shdr.sh_addr;
-      ld_bss_size = MD_SWAPQ(shdr.sh_size);
-      ld_bss_base = MD_SWAPQ(shdr.sh_addr);
+      ld_bss_size[th_id] = MD_SWAPQ(shdr.sh_size);
+      ld_bss_base[th_id] = MD_SWAPQ(shdr.sh_addr);
     }
   }
 
@@ -575,7 +576,7 @@ ld_load_prog(char *fname,		/* program to load */
 */    
     
     /* compute data segment size from data break point */
-    data_break = ld_data_base + ld_data_size;
+    data_break = ld_data_base[th_id] + ld_data_size[th_id];
 
     /* seek to the beginning of the first section header, the file header comes
        first, followed by the optional header (this is the aouthdr), the size
@@ -732,8 +733,8 @@ ld_load_prog(char *fname,		/* program to load */
 
 #endif /* BFD_LOADER */
 
-  uint64_t stack_base = (ld_text_base - 1024*1024*8) & 0xFFFFFFFFFFFF0000LL;
-  uint64_t stack_min = ld_stack_base;
+  uint64_t stack_base = (ld_text_base[th_id] - 1024*1024*8) & 0xFFFFFFFFFFFF0000LL;
+  uint64_t stack_min = ld_stack_base[th_id];
 
   // calculate size of argv and envp pointer and data arrays
   uint64_t argv_data_size = 0;
@@ -741,7 +742,8 @@ ld_load_prog(char *fname,		/* program to load */
   uint64_t argv_array_size;
   uint64_t envp_array_size;
   
-  for (argv_array_size = 0; argv[argv_array_size]; argv_array_size++)
+/* for (argv_array_size = 0; argv[argv_array_size]; argv_array_size++) */
+  for (argv_array_size = 0; argv_array_size < argc; argv_array_size++)
     argv_data_size += strlen(argv[argv_array_size]) + 1;
   for (envp_array_size = 0; envp[envp_array_size]; envp_array_size++)
     envp_data_size += strlen(envp[envp_array_size]) + 1;
@@ -772,7 +774,8 @@ ld_load_prog(char *fname,		/* program to load */
   
   // write argv array and data to memory
   addr = argv_data_base;
-  for (i = 0; argv[i]; i++)
+/* for (i = 0; argv[i]; i++) */
+  for (i = 0; i < argc; i++)
   {
     // write argv pointer
     mem_bcopy(mem_access, mem, Write,
@@ -815,13 +818,13 @@ ld_load_prog(char *fname,		/* program to load */
   for (i = 0; i < 66 /*NUM_REGS*/; i++) regs->regs_R[i] = 0;
 
   // write pc, sp, argc register, **argv register,
-  printf("PC: %llX\n", ld_prog_entry);
+  printf("PC: %llX\n", ld_prog_entry[th_id]);
 //  getchar();
-  regs->regs_PC = ld_prog_entry;
+  regs->regs_PC = ld_prog_entry[th_id];
 
   sp = stack_base;
-  ld_stack_size = ld_stack_base - sp;
-  ld_environ_base = sp;
+  ld_stack_size[th_id] = ld_stack_base[th_id] - sp;
+  ld_environ_base[th_id] = sp;
 
 //  uint64_t pc = ehdr.e_entry;
   regs->regs_R[30] = stack_min;
@@ -834,7 +837,7 @@ ld_load_prog(char *fname,		/* program to load */
 
   // initialize the operating system state
   
-  initialize_system_state();
+  initialize_system_state(th_id);
 
 
 
@@ -842,11 +845,11 @@ ld_load_prog(char *fname,		/* program to load */
 
   /* perform sanity checks on segment ranges */
 
-  if (!ld_text_base || !ld_text_size)
+  if (!ld_text_base[th_id] || !ld_text_size[th_id])
     fatal("executable is missing a `.text' section");
-  if (!ld_data_base || !ld_data_size)
+  if (!ld_data_base[th_id] || !ld_data_size[th_id])
     fatal("executable is missing a `.data' section");
-  if (!ld_prog_entry)
+  if (!ld_prog_entry[th_id])
     fatal("program entry point not specified");
 
   printf("passed\n");
@@ -879,16 +882,16 @@ ld_load_prog(char *fname,		/* program to load */
 
   /* set up a local stack pointer, this is where the argv and envp
      data is written into program memory */
-  ld_stack_base = (ld_text_base - 1024*1024*8) & 0xFFFFFFFFFFFF0000LL;
-//  ld_stack_base = ld_text_base - (409600+4096);
+  ld_stack_base[th_id] = (ld_text_base[th_id] - 1024*1024*8) & 0xFFFFFFFFFFFF0000LL;
+//  ld_stack_base[th_id] = ld_text_base[th_id] - (409600+4096);
 #if 0
-  sp = ROUND_DOWN(ld_stack_base - MD_MAX_ENVIRON, sizeof(MD_DOUBLE_TYPE));
+  sp = ROUND_DOWN(ld_stack_base[th_id] - MD_MAX_ENVIRON, sizeof(MD_DOUBLE_TYPE));
 #endif
-  sp = ld_stack_base - MD_MAX_ENVIRON;
-  ld_stack_size = ld_stack_base - sp;
+  sp = ld_stack_base[th_id] - MD_MAX_ENVIRON;
+  ld_stack_size[th_id] = ld_stack_base[th_id] - sp;
 
   /* initial stack pointer value */
-  ld_environ_base = sp;
+  ld_environ_base[th_id] = sp;
 
   /* write [argc] to stack */
   temp = MD_SWAPQ(argc);
@@ -938,7 +941,7 @@ ld_load_prog(char *fname,		/* program to load */
 	     &null_ptr, sizeof(md_addr_t));
 
   /* did we tromp off the stop of the stack? */
-  if (sp > ld_stack_base)
+  if (sp > ld_stack_base[th_id])
     {
       /* we did, indicate to the user that MD_MAX_ENVIRON must be increased,
 	 alternatively, you can use a smaller environment, or fewer
@@ -947,23 +950,23 @@ ld_load_prog(char *fname,		/* program to load */
     }
 
   /* initialize the bottom of heap to top of data segment */
-  ld_brk_point = ROUND_UP(ld_data_base + ld_data_size, MD_PAGE_SIZE);
+  ld_brk_point[th_id] = ROUND_UP(ld_data_base[th_id] + ld_data_size[th_id], MD_PAGE_SIZE);
 
   /* set initial minimum stack pointer value to initial stack value */
-  ld_stack_min = regs->regs_R[MD_REG_SP];
+  ld_stack_min[th_id] = regs->regs_R[MD_REG_SP];
 
-  regs->regs_R[MD_REG_SP] = ld_environ_base;
-  regs->regs_PC = ld_prog_entry;
+  regs->regs_R[MD_REG_SP] = ld_environ_base[th_id];
+  regs->regs_PC = ld_prog_entry[th_id];
   
-  initialize_system_state();
+  initialize_system_state(th_id);
   
   debug("ld_text_base: 0x%08x  ld_text_size: 0x%08x",
-	ld_text_base, ld_text_size);
+	ld_text_base[th_id], ld_text_size[th_id]);
   debug("ld_data_base: 0x%08x  ld_data_size: 0x%08x",
-	ld_data_base, ld_data_size);
+	ld_data_base[th_id], ld_data_size[th_id]);
   debug("ld_stack_base: 0x%08x  ld_stack_size: 0x%08x",
-	ld_stack_base, ld_stack_size);
-  debug("ld_prog_entry: 0x%08x", ld_prog_entry);
+	ld_stack_base[th_id], ld_stack_size[th_id]);
+  debug("ld_prog_entry: 0x%08x", ld_prog_entry[th_id]);
 
 #endif
 
