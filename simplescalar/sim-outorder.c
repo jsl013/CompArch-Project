@@ -156,9 +156,6 @@ static unsigned int max_insts;
 /* number of insts skipped before timing starts */
 static int fastfwd_count;
 
-/* number of insts skipped before timing starts */
-static int warmup_count;
-
 /* pipeline trace range and output filename */
 static int ptrace_nelt = 0;
 static char *ptrace_opts[2];
@@ -681,9 +678,6 @@ sim_reg_options(struct opt_odb_t *odb)
 
   opt_reg_int(odb, "-fastfwd", "number of insts skipped before timing starts",
       &fastfwd_count, /* default */0,
-      /* print */TRUE, /* format */NULL);
-  opt_reg_int(odb, "-warmup", "number of insts skipped before timing starts",
-      &warmup_count, /* default */0,
       /* print */TRUE, /* format */NULL);
   opt_reg_string_list(odb, "-ptrace",
       "generate pipetrace, i.e., <fname|stdout|stderr> <range>",
@@ -4761,23 +4755,25 @@ sim_main(void)
   /* fast forward equally for each thread (fastfwd_count / nthread) */
   if (fastfwd_count > 0)
   {
-    int icount;
-    md_inst_t inst;			/* actual instruction bits */
-    enum md_opcode op;		/* decoded opcode enum */
-    md_addr_t target_PC;		/* actual next/target PC address */
-    md_addr_t addr;			/* effective address, if load/store */
-    int is_write;			/* store? */
-    byte_t temp_byte = 0;		/* temp variable for spec mem access */
-    half_t temp_half = 0;		/* " ditto " */
-    word_t temp_word = 0;		/* " ditto " */
+    int th;
+    for (th=0; th<nthread; ++th) {
+      int icount;
+      md_inst_t inst;			/* actual instruction bits */
+      enum md_opcode op;		/* decoded opcode enum */
+      md_addr_t target_PC;		/* actual next/target PC address */
+      md_addr_t addr;			/* effective address, if load/store */
+      int is_write;			/* store? */
+      byte_t temp_byte = 0;		/* temp variable for spec mem access */
+      half_t temp_half = 0;		/* " ditto " */
+      word_t temp_word = 0;		/* " ditto " */
 #ifdef HOST_HAS_QWORD
-    qword_t temp_qword = 0;		/* " ditto " */
+      qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
-    enum md_fault_type fault;
+      enum md_fault_type fault;
 
-/* for (th=0; th<nthread; ++th) { */
-      struct thread_t *curr_th = &(thread[0]);
-/* fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count/nthread, th); */
+      /* for (th=0; th<nthread; ++th) { */
+      struct thread_t *curr_th = &(thread[th]);
+      /* fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count/nthread, th); */
       fprintf(stderr, "sim: ** fast forwarding %d insts of thread %d **\n", fastfwd_count, th);
 
 /* for (icount=0; icount < fastfwd_count/nthread; icount++) */
@@ -4841,7 +4837,7 @@ sim_main(void)
         curr_th->regs.regs_PC = curr_th->regs.regs_NPC;
         curr_th->regs.regs_NPC += sizeof(md_inst_t);
       }
-/* } */
+    }
   }
 
   fprintf(stderr, "sim: ** starting performance simulation **\n");
