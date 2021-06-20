@@ -2402,8 +2402,6 @@ ruu_commit(void)
 {
   int i, lat, events, committed = 0;
   static counter_t sim_ret_insn = 0;
-  counter_t dl1_misses;
-  counter_t dl2_misses;
 
   /* all values must be retired to the architected reg file in program order */
   while (RUU_num > 0 && committed < ruu_commit_width)
@@ -2454,8 +2452,6 @@ ruu_commit(void)
           /* go to the data cache */
           if (cache_dl1)
           {
-            dl1_misses = cache_dl1->misses;
-            dl2_misses = cache_dl2->misses;
             /* commit store value to D-cache */
             lat =
               cache_access(cache_dl1, Write, (LSQ[LSQ_head].addr&~3),
@@ -2465,18 +2461,6 @@ ruu_commit(void)
             if (lat == CACHE_BLKED) {
               fu->master->busy = 0;
               break;
-            }
-            if (dl1_misses < cache_dl1->misses) {
-              if (dl2_misses < cache_dl2->misses){
-                backend_miss_flag |= L2_CACHE_MISS;
-                rs->backend_miss_flag = L2_CACHE_MISS;
-                naive_dl2_miss_count++;
-              }
-              else {
-                backend_miss_flag |= L1_CACHE_MISS;
-                rs->backend_miss_flag = L1_CACHE_MISS;
-                naive_dl1_miss_count++;
-              }
             }
           }
 
@@ -2489,9 +2473,6 @@ ruu_commit(void)
                   NULL, 4, sim_cycle, NULL, NULL);
             if (lat > 1) {
               events |= PEV_TLBMISS;
-              backend_miss_flag |= TLB_MISS;
-              rs->backend_miss_flag = TLB_MISS;
-              naive_dtlb_miss_count++;
             }
           }
         }
@@ -2995,6 +2976,9 @@ ruu_issue(void)
   int i, load_lat, tlb_lat, n_issued;
   struct RS_link *node, *next_node;
   struct res_template *fu;
+  counter_t dl1_misses;
+  counter_t dl2_misses;
+  counter_t dtlb_misses;
 
   /* FIXME: could be a little more efficient when scanning the ready queue */
 
@@ -3111,6 +3095,8 @@ ruu_issue(void)
                 /* no! go to the data cache if addr is valid */
                 if (cache_dl1 && valid_addr)
                 {
+                  dl1_misses = cache_dl1->misses;
+                  dl2_misses = cache_dl2->misses;
                   /* access the cache if non-faulting */
                   load_lat =
                     cache_access(cache_dl1, Read,
@@ -3141,6 +3127,7 @@ ruu_issue(void)
               {
                 /* access the D-DLB, NOTE: this code will
                    initiate speculative TLB misses */
+                dtlb_misses = dtlb->misses;
                 tlb_lat =
                   cache_access(dtlb, Read, (rs->addr & ~3),
                       NULL, 4, sim_cycle, NULL, NULL);
@@ -3150,6 +3137,15 @@ ruu_issue(void)
                 /* D-cache/D-TLB accesses occur in parallel */
                 load_lat = MAX(tlb_lat, load_lat);
               }
+
+              if (dl2_misses < cache_dl2->misses)
+                rs->backend_miss_flag = L2_CACHE_MISS;
+              else if (dl1_misses < cache_dl1->misses)
+                rs->backend_miss_flag = L1_CACHE_MISS;
+              else if (dtlb_misses < dtlb->misses)
+                rs->backend_miss_flag = TLB_MISS;
+              else
+                rs->backend_miss_flag = CACHE_HIT;
 
               /* use computed cache access latency */
               eventq_queue_event(rs, sim_cycle + load_lat);
@@ -5110,7 +5106,7 @@ sim_main(void)
 /* } */
     if (RUU_num == RUU_size) {
       if (sim_num_insn > warmup_count) {
-        struct RUU_station *rs = &(RUU[RUU_head]);
+        struct RUU_station *rs = &(LSQ[LSQ_head]);
         if (rs->backend_miss_flag & TLB_MISS) {
           fmt_dtlb_miss_count++;
           sfmt_dtlb_miss_count++;
