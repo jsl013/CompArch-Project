@@ -3098,12 +3098,18 @@ ruu_issue(void)
                 load_lat = MAX(tlb_lat, load_lat);
               }
 
-              if (dl2_misses < cache_dl2->misses)
+              if (dl2_misses < cache_dl2->misses) {
                 rs->backend_miss_flag = L2_CACHE_MISS;
-              else if (dl1_misses < cache_dl1->misses)
+                naive_dl2_miss_count++;
+              }
+              else if (dl1_misses < cache_dl1->misses) {
                 rs->backend_miss_flag = L1_CACHE_MISS;
-              else if (dtlb_misses < dtlb->misses)
-                rs->backend_miss_flag = TLB_MISS;
+                naive_dl1_miss_count++;
+              }
+              else if (dtlb_misses < dtlb->misses) {
+                rs->backend_miss_flag |= TLB_MISS;
+                naive_dtlb_miss_count++;
+              }
               else
                 rs->backend_miss_flag = CACHE_HIT;
 
