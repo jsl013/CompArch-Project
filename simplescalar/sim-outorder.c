@@ -411,8 +411,9 @@ static int fmt_dispatch_tail = -1;
 static int fmt_fetch = 0;
 static int fmt_should_plus = 0;
 
-static int frontend_miss_flag;
-static int backend_miss_flag;
+static int frontend_miss_flag = 0;
+static int prev_frontend_miss_flag = 0;
+static md_addr_t prev_frontend_miss_pc = 0;
 
 /* number of FMT valid entries */
 static int curr_nfmt = 0;
@@ -2512,6 +2513,20 @@ ruu_commit(void)
           /* dir predictor update pointer */&rs->dir_update);
     }
 
+    if (rs->frontend_miss_flag) {
+      if (sim_num_insn > warmup_count) {
+        sfmt_itlb_miss_count += sfmt_local_itlb_count;
+        sfmt_il1_miss_count += sfmt_local_il1_count;
+        sfmt_il2_miss_count += sfmt_local_il2_count;
+      }
+      sfmt_local_itlb_count = 0;
+      sfmt_local_il1_count = 0;
+      sfmt_local_il2_count = 0;
+      for (int i=0; i<RUU_num; ++i) {
+        RUU[(RUU_head+i)%RUU_size].frontend_miss_flag = 0;
+      }
+    }
+
     if (MD_OP_FLAGS(rs->op) & F_CTRL)
     {
       int fmt_index = (fmt_dispatch_head + 1) % nfmt; /* it should be fmt_dispatch_head + 1*/
@@ -2546,19 +2561,6 @@ ruu_commit(void)
       }
     }
 
-    if (rs->frontend_miss_flag) {
-      if (sim_num_insn > warmup_count) {
-        sfmt_itlb_miss_count += sfmt_local_itlb_count;
-        sfmt_il1_miss_count += sfmt_local_il1_count;
-        sfmt_il2_miss_count += sfmt_local_il2_count;
-      }
-      sfmt_local_itlb_count = 0;
-      sfmt_local_il1_count = 0;
-      sfmt_local_il2_count = 0;
-      for (int i=0; i<RUU_num; ++i) {
-        RUU[(RUU_head+i)%RUU_size].frontend_miss_flag = 0;
-      }
-    }
 
     /* invalidate RUU operation instance */
     RUU[RUU_head].tag++;
@@ -3332,6 +3334,7 @@ struct fetch_rec {
   struct bpred_update_t dir_update;	/* bpred direction update info */
   int stack_recover_idx;		/* branch predictor RSB index */
   unsigned int ptrace_seq;		/* print trace sequence id */
+  int frontend_miss_flag;
 };
 static struct fetch_rec *fetch_data;	/* IFETCH -> DISPATCH inst queue */
 static int fetch_num;			/* num entries in IF -> DIS queue */
@@ -4102,6 +4105,7 @@ ruu_dispatch(void)
   qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
   enum md_fault_type fault;
+  int fetch_frontend_miss_flag;
 
   made_check = FALSE;
   n_dispatched = 0;
@@ -4133,6 +4137,7 @@ ruu_dispatch(void)
     dir_update_ptr = &(fetch_data[fetch_head].dir_update);
     stack_recover_idx = fetch_data[fetch_head].stack_recover_idx;
     pseq = fetch_data[fetch_head].ptrace_seq;
+    fetch_frontend_miss_flag = fetch_data[fetch_head].frontend_miss_flag;
 
     /* decode the inst */
     MD_SET_OPCODE(op, inst);
@@ -4323,16 +4328,17 @@ ruu_dispatch(void)
       rs->seq = ++inst_seq;
       rs->queued = rs->issued = rs->completed = FALSE;
       rs->ptrace_seq = pseq;
+      rs->frontend_miss_flag = fetch_frontend_miss_flag;
 /* if (sfmt_frontend_miss_flag != CACHE_HIT) { */
 /* rs->frontend_miss_flag = 1; */
 /* sfmt_frontend_miss_flag = 0; */
 /* } */
-      if (ruu_fetch_issue_delay == 0) {
-        rs->frontend_miss_flag = TRUE;
-      }
-      else {
-        rs->frontend_miss_flag = FALSE;
-      }
+/* if (ruu_fetch_issue_delay == 0) { */
+/* rs->frontend_miss_flag = TRUE; */
+/* } */
+/* else { */
+/* rs->frontend_miss_flag = FALSE; */
+/* } */
 
       /* split ld/st's into two operations: eff addr comp + mem access */
       if (MD_OP_FLAGS(op) & F_MEM)
@@ -4360,6 +4366,7 @@ ruu_dispatch(void)
         lsq->seq = ++inst_seq;
         lsq->queued = lsq->issued = lsq->completed = FALSE;
         lsq->ptrace_seq = pseq + 1;
+        lsq->frontend_miss_flag = fetch_frontend_miss_flag;
 
         /* pipetrace this uop */
         ptrace_newuop(lsq->ptrace_seq, "internal ld/st", lsq->PC, 0);
@@ -4662,17 +4669,6 @@ ruu_fetch(void)
 /* last_inst_missed = TRUE; */
         if (il1_misses < cache_il1->misses) {
           last_inst_missed = TRUE;
-          if (il2_misses < cache_il2->misses) {
-            // L2 I-cache miss
-            frontend_miss_flag = L2_CACHE_MISS;
-/* sfmt_frontend_miss_flag = L2_CACHE_MISS; */
-            naive_il2_miss_count++;
-          }
-          else {
-            frontend_miss_flag = L1_CACHE_MISS;
-/* sfmt_frontend_miss_flag = L1_CACHE_MISS; */
-            naive_il1_miss_count++;
-          }
         }
 /* else */
 /* frontend_miss_flag = CACHE_HIT; */
@@ -4689,9 +4685,6 @@ ruu_fetch(void)
               NULL, NULL);
         if (tlb_lat > 1) {
           last_inst_tmissed = TRUE;
-          frontend_miss_flag = TLB_MISS;
-/* sfmt_frontend_miss_flag = TLB_MISS; */
-          naive_itlb_miss_count++;
         }
 /* else */
 /* frontend_miss_flag = CACHE_HIT; */
@@ -4706,6 +4699,23 @@ ruu_fetch(void)
       {
         /* I-cache miss, block fetch until it is resolved */
         ruu_fetch_issue_delay += lat - 1;
+        prev_frontend_miss_pc = fetch_regs_PC;
+        if (il2_misses < cache_il2->misses) {
+          // L2 I-cache miss
+          frontend_miss_flag = L2_CACHE_MISS;
+          /* sfmt_frontend_miss_flag = L2_CACHE_MISS; */
+          naive_il2_miss_count++;
+        }
+        else if (il1_misses < cache_il1->misses) {
+          frontend_miss_flag = L1_CACHE_MISS;
+          /* sfmt_frontend_miss_flag = L1_CACHE_MISS; */
+          naive_il1_miss_count++;
+        }
+        else {
+          frontend_miss_flag = TLB_MISS;
+          /* sfmt_frontend_miss_flag = TLB_MISS; */
+          naive_itlb_miss_count++;
+        }
         break;
       }
       /* else, I-cache/I-TLB hit */
@@ -4787,6 +4797,10 @@ ruu_fetch(void)
     fetch_data[fetch_tail].pred_PC = fetch_pred_PC;
     fetch_data[fetch_tail].stack_recover_idx = stack_recover_idx;
     fetch_data[fetch_tail].ptrace_seq = ptrace_seq++;
+    if (fetch_pred_PC == prev_frontend_miss_pc)
+      fetch_data[fetch_tail].frontend_miss_flag = TRUE;
+    else
+      fetch_data[fetch_tail].frontend_miss_flag = FALSE;
 
     /* for pipe trace */
     ptrace_newinst(fetch_data[fetch_tail].ptrace_seq,
