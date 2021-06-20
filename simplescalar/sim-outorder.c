@@ -362,9 +362,6 @@ static counter_t naive_dl2_miss_count = 0;
 static counter_t naive_dtlb_miss_count = 0;
 static counter_t naive_branch_mispred_count = 0;
 
-/* CPI stack */
-static counter_t cpi_stack = 0;
-
 /* FMT */
 static counter_t fmt_il1_miss_count = 0;
 static counter_t fmt_il2_miss_count = 0;
@@ -452,7 +449,6 @@ static counter_t sfmt_dtlb_miss_count = 0;
 static counter_t sfmt_bpenalty_count = 0;
 static counter_t sfmt_funct_stall_count = 0;
 
-/* static int sfmt_frontend_miss_flag; */
 
 /* local counters */
 static counter_t sfmt_local_il1_count = 0;
@@ -902,11 +898,6 @@ sim_reg_options(struct opt_odb_t *odb)
       &cache_dl1_opt, "dl1:128:32:8:l", // baseline: i7
       /* print */TRUE, NULL);
 
-  opt_reg_string(odb, "-cache:dl1:mshr",
-      "data cache MSHR config, i.e., {<config>|none}",
-      &cache_mshr_opt, "4:4", 
-      /* print */TRUE, NULL);
-
   opt_reg_note(odb,
       "  The cache config parameter <config> has the following format:\n"
       "\n"
@@ -1173,12 +1164,6 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
   if (LSQ_size < 2 || (LSQ_size & (LSQ_size-1)) != 0)
     fatal("LSQ size must be a positive number > 1 and a power of two");
 
-  sscanf(cache_mshr_opt, "%d:%d", &cache_nmshr, &cache_mshr_nmisses);
-  if (cache_nmshr < 1)
-    fatal("Number of MSHR must be a positive number > 1");
-  if (cache_mshr_nmisses < 1)
-    fatal("Number of misses per MSHR must be a positive number > 1");
-
   /* use a level 1 D-cache? */
   if (!mystricmp(cache_dl1_opt, "none"))
   {
@@ -1196,7 +1181,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 D-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_dl1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        dl1_access_fn, /* hit lat */cache_dl1_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+        dl1_access_fn, /* hit lat */cache_dl1_lat);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_dl2_opt, "none"))
@@ -1209,7 +1194,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_dl2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          dl2_access_fn, /* hit lat */cache_dl2_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+          dl2_access_fn, /* hit lat */cache_dl2_lat);
     }
   }
 
@@ -1252,7 +1237,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 I-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_il1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        il1_access_fn, /* hit lat */cache_il1_lat, /* nmshr */0, /* mshr_nmisses */0);
+        il1_access_fn, /* hit lat */cache_il1_lat);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_il2_opt, "none"))
@@ -1271,7 +1256,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_il2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          il2_access_fn, /* hit lat */cache_il2_lat, /* nmshr */0, /* mshr_nmisses */0);
+          il2_access_fn, /* hit lat */cache_il2_lat);
     }
   }
 
@@ -1286,7 +1271,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     itlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), itlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1);
   }
 
   /* use a D-TLB? */
@@ -1300,7 +1285,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     dtlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), dtlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1);
   }
 
   if (cache_dl1_lat < 1)
@@ -1482,8 +1467,6 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
       &recovery_count, /* initial value */0, /* format */NULL);
   if (pred)
     bpred_reg_stats(pred, sdb);
-
-  /* MSHR stats */
 
   /* FMT stats */
   stat_reg_counter(sdb, "FMT_il1", "FMT L1 I-cache miss counts",
@@ -2448,10 +2431,6 @@ ruu_commit(void)
                   NULL, 4, sim_cycle, NULL, NULL);
             if (lat > cache_dl1_lat)
               events |= PEV_CACHEMISS;
-            if (lat == CACHE_BLKED) {
-              fu->master->busy = 0;
-              break;
-            }
           }
 
           /* all loads and stores must to access D-TLB */
@@ -4665,17 +4644,14 @@ ruu_fetch(void)
         if (il2_misses < cache_il2->misses) {
           // L2 I-cache miss
           frontend_miss_flag = L2_CACHE_MISS;
-          /* sfmt_frontend_miss_flag = L2_CACHE_MISS; */
           naive_il2_miss_count++;
         }
         else if (il1_misses < cache_il1->misses) {
           frontend_miss_flag = L1_CACHE_MISS;
-          /* sfmt_frontend_miss_flag = L1_CACHE_MISS; */
           naive_il1_miss_count++;
         }
-        else {
-          frontend_miss_flag = TLB_MISS;
-          /* sfmt_frontend_miss_flag = TLB_MISS; */
+        if (last_inst_tmissed) {
+          frontend_miss_flag |= TLB_MISS;
           naive_itlb_miss_count++;
         }
         break;
@@ -5038,7 +5014,7 @@ sim_main(void)
       fmt[fmt_fetch].local_itlb_count++;
       sfmt_local_itlb_count++;
     }
-    else if (frontend_miss_flag & L2_CACHE_MISS) {
+    if (frontend_miss_flag & L2_CACHE_MISS) {
       fmt[fmt_fetch].local_il2_count++;
       sfmt_local_il2_count++;
     }
@@ -5093,9 +5069,6 @@ sim_main(void)
       }
     }
 
-/* if (RUU_num < RUU_size) */
-/* backend_miss_flag = CACHE_HIT; */
-
     /* update buffer occupancy stats */
     IFQ_count += fetch_num;
     IFQ_fcount += ((fetch_num == ruu_ifq_size) ? 1 : 0);
@@ -5111,7 +5084,6 @@ sim_main(void)
     if (max_insts && sim_num_insn >= max_insts)
       return;
     if (program_complete) {
-      cpi_stack = fmt_il1_miss_count + fmt_il2_miss_count + fmt_itlb_miss_count + fmt_dl1_miss_count + fmt_dl2_miss_count + fmt_dtlb_miss_count + fmt_bpenalty_count + fmt_funct_stall_count;
       return;
     }
   }
