@@ -166,6 +166,12 @@ static int LSQ_size = 4;
 /* perfect memory disambiguation */   
 int perfect_disambig = FALSE;
 
+/* cache l1 data cache blocking option */
+static int cache_dl1_non_blocking;
+
+/* cache l2 data cache blocking option */
+static int cache_dl2_non_blocking;
+
 /* l1 data cache config, i.e., {<config>|none} */
 static char *cache_dl1_opt;
 
@@ -593,6 +599,9 @@ dl1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
   if (cache_dl2)
   {
     /* access next level of data cache hierarchy */
+    if (cache_dl2->t_blk_resolved > now)
+      return CACHE_BLKED;
+
     lat = cache_access(cache_dl2, cmd, baddr, NULL, bsize,
         /* now */now, /* pudata */NULL, /* repl addr */NULL);
     if (cmd == Read)
@@ -913,9 +922,9 @@ sim_reg_options(struct opt_odb_t *odb)
       &cache_dl1_opt, "dl1:128:32:8:l", // baseline: i7
       /* print */TRUE, NULL);
 
-  opt_reg_string(odb, "-cache:dl1:mshr",
+  opt_reg_string(odb, "-cache:mshr",
       "data cache MSHR config, i.e., {<config>|none}",
-      &cache_mshr_opt, "4:4", 
+      &cache_mshr_opt, "4:2", 
       /* print */TRUE, NULL);
 
   opt_reg_note(odb,
@@ -932,6 +941,16 @@ sim_reg_options(struct opt_odb_t *odb)
       "    Examples:   -cache:dl1 dl1:4096:32:1:l\n"
       "                -dtlb dtlb:128:4096:32:r\n"
       );
+
+  opt_reg_int(odb, "-cache:dl1nonblocking",
+      "l1 data cache non blocking option",
+      &cache_dl1_non_blocking, /* default */0,
+      /* print */TRUE, /* format */NULL);
+
+  opt_reg_int(odb, "-cache:dl2nonblocking",
+      "l2 data cache non blocking option",
+      &cache_dl2_non_blocking, /* default */0,
+      /* print */TRUE, /* format */NULL);
 
   opt_reg_int(odb, "-cache:dl1lat",
       "l1 data cache hit latency (in cycles)",
@@ -1185,10 +1204,10 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     fatal("LSQ size must be a positive number > 1 and a power of two");
 
   sscanf(cache_mshr_opt, "%d:%d", &cache_nmshr, &cache_mshr_nmisses);
-  if (cache_nmshr < 1)
-    fatal("Number of MSHR must be a positive number > 1");
-  if (cache_mshr_nmisses < 1)
-    fatal("Number of misses per MSHR must be a positive number > 1");
+  if (cache_nmshr < 0)
+    fatal("Number of MSHR must be a positive number or zero");
+  if (cache_mshr_nmisses < 0)
+    fatal("Number of misses per MSHR must be a positive number or zero");
 
   /* use a level 1 D-cache? */
   if (!mystricmp(cache_dl1_opt, "none"))
@@ -1207,7 +1226,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 D-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_dl1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        dl1_access_fn, /* hit lat */cache_dl1_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+        dl1_access_fn, /* hit lat */cache_dl1_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses, /* non_blocking */cache_dl1_non_blocking);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_dl2_opt, "none"))
@@ -1220,7 +1239,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_dl2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          dl2_access_fn, /* hit lat */cache_dl2_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses);
+          dl2_access_fn, /* hit lat */cache_dl2_lat, /* nmshr */cache_nmshr, /* mshr_nmisses */cache_mshr_nmisses, /* non_blocking */cache_dl2_non_blocking);
     }
   }
 
@@ -1263,7 +1282,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       fatal("bad l1 I-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
     cache_il1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */0, assoc, cache_char2policy(c),
-        il1_access_fn, /* hit lat */cache_il1_lat, /* nmshr */0, /* mshr_nmisses */0);
+        il1_access_fn, /* hit lat */cache_il1_lat, /* nmshr */0, /* mshr_nmisses */0, /* non_blocking */TRUE);
 
     /* is the level 2 D-cache defined? */
     if (!mystricmp(cache_il2_opt, "none"))
@@ -1282,7 +1301,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
             "<name>:<nsets>:<bsize>:<assoc>:<repl>");
       cache_il2 = cache_create(name, nsets, bsize, /* balloc */FALSE,
           /* usize */0, assoc, cache_char2policy(c),
-          il2_access_fn, /* hit lat */cache_il2_lat, /* nmshr */0, /* mshr_nmisses */0);
+          il2_access_fn, /* hit lat */cache_il2_lat, /* nmshr */0, /* mshr_nmisses */0, /* non_blocking */TRUE);
     }
   }
 
@@ -1297,7 +1316,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     itlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), itlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0, /* non_blocking */TRUE);
   }
 
   /* use a D-TLB? */
@@ -1311,7 +1330,7 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
     dtlb = cache_create(name, nsets, bsize, /* balloc */FALSE,
         /* usize */sizeof(md_addr_t), assoc,
         cache_char2policy(c), dtlb_access_fn,
-        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0);
+        /* hit latency */1, /* nmshr */0, /* mshr_nmisses */0, /* non_blocking */TRUE);
   }
 
   if (cache_dl1_lat < 1)
@@ -2454,6 +2473,10 @@ ruu_commit(void)
           if (cache_dl1)
           {
             /* commit store value to D-cache */
+            if (cache_dl1->t_blk_resolved > sim_cycle) {
+              fu->master->busy = 0;
+              break;
+            }
             lat =
               cache_access(cache_dl1, Write, (LSQ[LSQ_head].addr&~3),
                   NULL, 4, sim_cycle, NULL, NULL);
@@ -3097,13 +3120,19 @@ ruu_issue(void)
                 /* no! go to the data cache if addr is valid */
                 if (cache_dl1 && valid_addr)
                 {
-                  dl1_misses = cache_dl1->misses;
-                  dl2_misses = cache_dl2->misses;
-                  /* access the cache if non-faulting */
-                  load_lat =
-                    cache_access(cache_dl1, Read,
-                        (rs->addr & ~3), NULL, 4,
-                        sim_cycle, NULL, NULL);
+                  /* check whether D-cache is blocked */
+                  if (cache_dl1->t_blk_resolved > sim_cycle) {
+                    load_lat = CACHE_BLKED;
+                  }
+                  else {
+                    dl1_misses = cache_dl1->misses;
+                    dl2_misses = cache_dl2->misses;
+                    /* access the cache if non-faulting */
+                    load_lat =
+                      cache_access(cache_dl1, Read,
+                          (rs->addr & ~3), NULL, 4,
+                          sim_cycle, NULL, NULL);
+                  }
                   if (load_lat > cache_dl1_lat)
                     events |= PEV_CACHEMISS;
                   if (load_lat == CACHE_BLKED) {

@@ -271,7 +271,9 @@ cache_create(char *name,		/* name of the cache */
       tick_t now),
     unsigned int hit_latency,	/* latency in cycles for a hit */
     int nmshr, /* number of MSHR entries */ 
-    int mshr_nmisses)	/* maximum misses per MSHR */
+    int mshr_nmisses,	/* maximum misses per MSHR */
+    int non_blocking) /* if 1, non-blocking cache */
+
 {
   struct cache_t *cp;
   struct cache_blk_t *blk;
@@ -316,15 +318,6 @@ cache_create(char *name,		/* name of the cache */
   cp->policy = policy;
   cp->hit_latency = hit_latency;
 
-  cp->nmshr = nmshr;
-  cp->mshr = (struct mshr_t *) calloc(nmshr, sizeof(struct mshr_t));
-  cp->mshr_nalloc = 0;
-  cp->mshr_nmisses = mshr_nmisses;
-  for (i=0; i<nmshr; i++) {
-    cp->mshr[i].bvalid = 0;
-    cp->mshr[i].nalloc = 0;
-  }
-
   /* miss/replacement functions */
   cp->blk_access_fn = blk_access_fn;
 
@@ -363,6 +356,18 @@ cache_create(char *name,		/* name of the cache */
       (cp->balloc ? (bsize*sizeof(byte_t)) : 0));
   if (!cp->data)
     fatal("out of virtual memory");
+
+  cp->non_blocking = non_blocking;
+  cp->t_blk_resolved = 0;
+  cp->nmshr = nmshr;
+  cp->mshr_nmisses = mshr_nmisses;
+  cp->mshr_nalloc = 0;
+  if (nmshr > 0)
+    cp->mshr = (struct mshr_t *) calloc(nmshr, sizeof(struct mshr_t));
+  for (i=0; i<nmshr; i++) {
+    cp->mshr[i].bvalid = 0;
+    cp->mshr[i].nalloc = 0;
+  }
 
   /* slice up the data blocks */
   for (bindex=0,i=0; i<nsets; i++)
@@ -548,13 +553,11 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* permissions are checked on cache misses */
 
   /* check for a fast hit: access to same block */
-  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL) && (cp->last_blk->ready <= now))
+  if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL))
   {
-    if (cp->last_blk->ready <= now) {
-      /* hit in the same block */
-      blk = cp->last_blk;
-      goto cache_fast_hit;
-    }
+    /* hit in the same block */
+    blk = cp->last_blk;
+    goto cache_fast_hit;
   }
 
   if (cp->hsize)
@@ -566,7 +569,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->hash_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
         goto cache_hit;
     }
   }
@@ -577,7 +580,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk;
         blk=blk->way_next)
     {
-      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID) && (blk->ready <= now))
+      if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
         goto cache_hit;
     }
   }
@@ -591,13 +594,15 @@ cache_access(struct cache_t *cp,	/* cache to access */
     for (i=0; i<cp->nmshr; i++) {
       curr_mshr = &(cp->mshr[i]);
       if (curr_mshr->bvalid && curr_mshr->baddr == tagset) {
+        /* secondary miss */
         goto mshr_hit;
       }
-      else if (curr_mshr->bvalid && curr_mshr->t_return <= now) {
+      else if (curr_mshr->bvalid && curr_mshr->t_return < now) {
         curr_mshr->bvalid = 0;
-        cp->mshr_nalloc = 0;
+        curr_mshr->nalloc = 0;
+        cp->mshr_nalloc--;
       }
-      else if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
+      if (!curr_mshr->bvalid) { /* !valid || non-matching baddr */
         target_mshr = curr_mshr;
       }
     }
@@ -609,7 +614,13 @@ cache_access(struct cache_t *cp,	/* cache to access */
       target_mshr->nalloc = 1;
       cp->mshr_nalloc++;
     }
-    else { /* structural-stall miss */
+    else { /* structural-stall miss, all MSHR entries are busy */
+      int min_t_return = cp->mshr[0].t_return;
+      for (i=1; i<cp->nmshr; ++i) {
+        if (min_t_return > cp->mshr[i].t_return)
+          min_t_return = cp->mshr[i].t_return;
+      }
+      cp->t_blk_resolved = min_t_return;
       lat = CACHE_BLKED;
       return lat;
     }
@@ -698,8 +709,13 @@ cache_access(struct cache_t *cp,	/* cache to access */
     link_htab_ent(cp, &cp->sets[set], repl);
 
   if (cp->nmshr) {
+    /* primary miss */
     target_mshr->t_return = now + lat;
   }
+
+  /* blocking cache */
+  if (!cp->non_blocking) 
+    cp->t_blk_resolved = now + lat;
 
   /* return latency of the operation */
   return lat;
@@ -771,8 +787,8 @@ cache_fast_hit: /* fast hit handler */
   return (int) MAX(cp->hit_latency, (blk->ready - now));
   
 mshr_hit:
-  /* secondary miss */
   if (curr_mshr->nalloc < cp->mshr_nmisses) {
+    /* secondary miss */
     curr_mshr->nalloc++;
     lat = BOUND_POS(curr_mshr->t_return - now);
   }
