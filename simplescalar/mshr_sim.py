@@ -23,7 +23,7 @@ bin_files = {
         "bzip2" : "../spec_alpha/bzip2/bzip2_base.alpha",
         "gcc" : "../spec_alpha/gcc/gcc.alpha",
         "gromacs" : "../spec_alpha/gromacs/gromacs_base.alpha",
-        "mcf" : "../spec_alpha/mch/mcf_base.alpha"
+        "mcf" : "../spec_alpha/mcf/mcf_base.alpha"
 # "zeusmp" : "../spec_alpha/zeusmp/zeusmp_base.alpha"
         }
 
@@ -64,7 +64,7 @@ input_tags = {
         "mcf": ["inp"]
         }
 
-stat = { "IPC" : [], "Origin" : [], "1:1 MSHR" : [], "4:2 MSHR" : [], "4:2 MSHR" : [] }
+stat = { "IPC" : [], "Origin" : [], "1:1 MSHR" : [], "4:2 MSHR" : [], "4:4 MSHR" : [] }
 
 mshr_opt = ["0:0", "1:1", "4:2", "4:4"]
 
