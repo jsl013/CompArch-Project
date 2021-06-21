@@ -11,10 +11,8 @@ import pandas as pd
 # The evaluation standard is IPC
 
 sim = 'sim-outorder'
-fastfwd = 2000000000 # 2B
-ff = '2B'
-max_inst = 1000000000 # 1B
-mi = '1B' 
+fastfwd = 200000000
+max_inst = 100000000
 config = './config/oo-fmt.cfg'
 n_stack = 4 # naive, naive_non_spec, FMT, sFMT
 
