@@ -522,6 +522,9 @@ il1_access_fn(enum mem_cmd cmd,		/* access cmd, Read or Write */
 
   if (cache_il2)
   {
+    if (cache_il2->t_blk_resolved > now)
+      return CACHE_BLKED;
+    
     /* access next level of inst cache hierarchy */
     lat = cache_access(cache_il2, cmd, baddr, NULL, bsize,
         /* now */now, /* pudata */NULL, /* repl addr */NULL);
