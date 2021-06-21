@@ -8,7 +8,7 @@ import pandas as pd
 
 # * n:m {nmshr:mshr_nmisses}
 # Compare four cases : 1) original SimpleScalar, 2) 1:1 MSHR, 3) 4:2 MSHR, 4) 4:4 MSHR
-# The evalution standard is IPC
+# The evaluation standard is IPC
 
 sim = 'sim-outorder'
 fastfwd = 2000000000 # 2B
