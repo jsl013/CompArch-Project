@@ -361,6 +361,7 @@ static counter_t naive_dl1_miss_count = 0;
 static counter_t naive_dl2_miss_count = 0;
 static counter_t naive_dtlb_miss_count = 0;
 static counter_t naive_branch_mispred_count = 0;
+static counter_t naive_non_spec_bmispred_count = 0;
 
 /* FMT */
 static counter_t fmt_il1_miss_count = 0;
@@ -1501,39 +1502,39 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
   stat_reg_counter(sdb, "naive_bpenalty", "naive branch mispredict penalty counts",
       &naive_branch_mispred_count, /* initial value */0, /* format */NULL);
 
-//  stat_reg_formula(sdb, "fmt_il1_rate", "FMT L1 I-cache miss rate",
+//  stat_reg_formula(sdb, "fmt_il1_miss_count", "FMT L1 I-cache miss miss_count",
 //      "fmt_il1_miss_count / sim_num_insn", NULL);
-//  stat_reg_formula(sdb, "FMT_il2_rate", "FMT L2 I-cache miss rate",
+//  stat_reg_formula(sdb, "FMT_il2_miss_count", "FMT L2 I-cache miss miss_count",
 //      "fmt_il2_miss_count", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_itlb_rate", "FMT I-TLB miss rate",
-//      "fmt_itlb_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dl1_rate", "FMT L1 D-cache miss rate",
-//      "fmt_dl1_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dl2_rate", "FMT L2 D-cache miss rate",
-//      "fmt_dl2_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_dtlb_rate", "FMT D-TLB miss rate",
-//      "fmt_dtlb_miss_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_bpenalty_rate", "FMT branch mispredict penalty rate",
-//      "fmt_bpenalty_count / cpi_stack", /* format */NULL);
-//  stat_reg_formula(sdb, "FMT_funct_stall_rate", "FMT functional unit stall rate",
-//      "fmt_funct_stall_count / cpi_stack", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_itlb_miss_count", "FMT I-TLB miss miss_count",
+//      "fmt_itlb_miss_count / sim_num_insn", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dl1_miss_count", "FMT L1 D-cache miss miss_count",
+//      "fmt_dl1_miss_count / sim_num_insn", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dl2_miss_count", "FMT L2 D-cache miss miss_count",
+//      "fmt_dl2_miss_count / sim_num_insn", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_dtlb_miss_count", "FMT D-TLB miss miss_count",
+//      "fmt_dtlb_miss_count / sim_num_insn", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_bpenalty_count", "FMT branch mispredict penalty miss_count",
+//      "fmt_bpenalty_count / sim_num_insn", /* format */NULL);
+//  stat_reg_formula(sdb, "FMT_funct_stall_count", "FMT functional unit stall miss_count",
+//      "fmt_funct_stall_count / sim_num_insn", /* format */NULL);
 
   /* sFMT stats */
-  stat_reg_counter(sdb, "sFMT il1", "sFMT L1 I-cache miss counts",
+  stat_reg_counter(sdb, "sFMT_il1", "sFMT L1 I-cache miss counts",
       &sfmt_il1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT il2", "sFMT L2 I-cache miss counts",
+  stat_reg_counter(sdb, "sFMT_il2", "sFMT L2 I-cache miss counts",
       &sfmt_il2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT itlb", "sFMT I-TLB miss counts",
+  stat_reg_counter(sdb, "sFMT_itlb", "sFMT I-TLB miss counts",
       &sfmt_itlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dl1", "sFMT L1 D-cache miss counts",
+  stat_reg_counter(sdb, "sFMT_dl1", "sFMT L1 D-cache miss counts",
       &sfmt_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dl2", "sFMT L1 D-cache miss counts",
+  stat_reg_counter(sdb, "sFMT_dl2", "sFMT L1 D-cache miss counts",
       &sfmt_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT dtlb", "sFMT L1 D-TLB miss counts",
+  stat_reg_counter(sdb, "sFMT_dtlb", "sFMT L1 D-TLB miss counts",
       &sfmt_dtlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT bpenalty", "sFMT branch mispredict penalty counts",
+  stat_reg_counter(sdb, "sFMT_bpenalty", "sFMT branch mispredict penalty counts",
       &sfmt_bpenalty_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "sFMT funct stall", "sFMT functional unit stall counts",
+  stat_reg_counter(sdb, "sFMT_funct_stall", "sFMT functional unit stall counts",
       &sfmt_funct_stall_count, /* initial value */0, /* format */NULL);
 
   /* register cache stats */
@@ -2660,6 +2661,9 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
       LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
       LSQ_num--;
     }
+
+    if (MD_OP_FLAGS(RUU[RUU_index].op) & F_CTRL)
+      naive_non_spec_bmispred_count--;
 
     /* recover any resources used by this RUU operation */
     for (i=0; i<MAX_ODEPS; i++)
