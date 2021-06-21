@@ -684,6 +684,8 @@ cache_access(struct cache_t *cp,	/* cache to access */
   repl->status = CACHE_BLK_VALID;	/* dirty bit set on update */
 
   /* read data block */
+  if (cp->blk_access_fn(Read, CACHE_BADDR(cp, addr), cp->bsize, repl, now+lat) == CACHE_BLKED)
+    panic("L2 D-cache's structural stall");
   lat += cp->blk_access_fn(Read, CACHE_BADDR(cp, addr), cp->bsize,
       repl, now+lat);
 
