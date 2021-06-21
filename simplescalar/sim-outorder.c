@@ -811,12 +811,12 @@ sim_reg_options(struct opt_odb_t *odb)
 
   opt_reg_int(odb, "-cache:dl1nonblocking",
       "l1 data cache non blocking option",
-      &cache_dl1_non_blocking, /* default */0,
+      &cache_dl1_non_blocking, /* default */1,
       /* print */TRUE, /* format */NULL);
 
   opt_reg_int(odb, "-cache:dl2nonblocking",
       "l2 data cache non blocking option",
-      &cache_dl2_non_blocking, /* default */0,
+      &cache_dl2_non_blocking, /* default */1,
       /* print */TRUE, /* format */NULL);
 
   opt_reg_int(odb, "-cache:dl1lat",
@@ -936,6 +936,7 @@ sim_reg_options(struct opt_odb_t *odb)
   opt_reg_flag(odb, "-bugcompat",
       "operate in backward-compatible bugs mode (for testing only)",
       &bugcompat_mode, /* default */FALSE, /* print */TRUE, NULL);
+}
 
 /* check simulator-specific option values */
   void
@@ -4347,7 +4348,9 @@ ruu_fetch(void)
           cache_access(cache_il1, Read, IACOMPRESS(fetch_regs_PC),
               NULL, ISCOMPRESS(sizeof(md_inst_t)), sim_cycle,
               NULL, NULL);
-        if (il1_misses < cache_il1->misses) {
+        if (lat == CACHE_BLKED)
+          break;
+        if (lat > cache_il1_lat) {
           last_inst_missed = TRUE;
         }
       }

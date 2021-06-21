@@ -12,9 +12,8 @@ import pandas as pd
 
 sim = 'sim-outorder'
 fastfwd = 200000000
-max_inst = 100000000
-config = './config/oo-fmt.cfg'
-n_stack = 4 # naive, naive_non_spec, FMT, sFMT
+max_inst = 200000000
+config = './config/oo-default.cfg'
 
 mshr_stat_tags = [ "sim_IPC" ]
 
