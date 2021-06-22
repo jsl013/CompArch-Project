@@ -1579,18 +1579,8 @@ sim_load_prog(char *fname,		/* program to load */
 
   for (th=0; th<nthread; ++th) {
     struct thread_t *curr_th = &(thread[th]);
-    /* th_argv = calloc(th_argc[th], sizeof(char *)); */
-    /* for (i=0; i<th_argc[th]; ++i) { */
-    /* th_argv[i] = calloc(strlen(argv[argv_start+i]), sizeof(char)); */
-    /* th_argv[i] = argv[argv_start+i]; */
-    /* } */
-    /* ld_load_prog(th_argv[0], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE, th); */
     ld_load_prog(argv[argv_start], th_argc[th], &argv[argv_start], envp, &(curr_th->regs), curr_th->mem, TRUE);
     argv_start += th_argc[th]+1;
-    /* for (i=0; i<th_argc[th]; ++i) { */
-    /* free(th_argv[i]); */
-    /* } */
-    /* free(th_argv); */
   }
 
   /* initialize here, so symbols can be loaded */
