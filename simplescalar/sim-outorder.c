@@ -2838,11 +2838,9 @@ ruu_issue(void)
                     events |= PEV_CACHEMISS;
                   if (load_lat == CACHE_BLKED) {
                     fu->master->busy = 0;
-                    // requeue the load
-                    // issue is failed
+                    /* reclaim ready list entry */
                     readyq_enqueue(rs);
                     rs->issued = FALSE;
-                    /* reclaim ready list entry */
                     RSLINK_FREE(node);
                     continue;
                   }
