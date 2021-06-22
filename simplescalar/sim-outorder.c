@@ -346,14 +346,6 @@ static counter_t sim_total_branches = 0;
 static tick_t sim_cycle = 0;
 
 /* naive CPI stack */
-/* static int il1_miss_penalty = 7; */
-/* static int il2_miss_penalty = 32; */
-/* static int itlb_miss_penalty = 30; */
-/* static int dl1_miss_penalty = 7; */
-/* static int dl2_miss_penalty = 32; */
-/* static int dtlb_miss_penalty = 30; */
-/* static int branch_mispred_penalty = 2; */
-
 static counter_t naive_il1_miss_count = 0;
 static counter_t naive_il2_miss_count = 0;
 static counter_t naive_itlb_miss_count = 0;
@@ -361,7 +353,17 @@ static counter_t naive_dl1_miss_count = 0;
 static counter_t naive_dl2_miss_count = 0;
 static counter_t naive_dtlb_miss_count = 0;
 static counter_t naive_branch_mispred_count = 0;
+
+static counter_t naive_non_spec_il1_miss_count = 0;
+static counter_t naive_non_spec_il2_miss_count = 0;
+static counter_t naive_non_spec_itlb_miss_count = 0;
+static counter_t naive_non_spec_dl1_miss_count = 0;
+static counter_t naive_non_spec_dl2_miss_count = 0;
+static counter_t naive_non_spec_dtlb_miss_count = 0;
 static counter_t naive_non_spec_bmispred_count = 0;
+
+static md_addr_t non_spec_last_fetch_miss_flag = 0;
+static md_addr_t non_spec_fetch_miss_flag = 0;
 
 /* FMT */
 static counter_t fmt_il1_miss_count = 0;
@@ -394,6 +396,15 @@ static counter_t sim_invalid_addrs;
 #define L1_CACHE_MISS 0x00000001
 #define L2_CACHE_MISS 0x00000002
 #define TLB_MISS      0x00000004
+
+/* naive non spec miss event flag */
+#define DL1_CACHE_MISS 0x00000001
+#define DL2_CACHE_MISS 0x00000002
+#define DTLB_MISS      0x00000004
+#define IL1_CACHE_MISS 0x00000008
+#define IL2_CACHE_MISS 0x00000010
+#define ITLB_MISS      0x00000020
+#define BRANCH_MISPRED 0x00000040
 
 static int fmt_dispatch_head = -1;
 static int fmt_dispatch_tail = -1;
@@ -1487,21 +1498,6 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
   stat_reg_counter(sdb, "FMT_funct_stall", "FMT functional unit stall counts",
       &fmt_funct_stall_count, /* initial value */0, /* format */NULL);
 
-  stat_reg_counter(sdb, "naive_il1", "naive L1 I-cache miss counts",
-      &naive_il1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_il2", "naive L2 I-cache miss counts",
-      &naive_il2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_itlb", "naive I-TLB miss counts",
-      &naive_itlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dl1", "naive L1 D-cache miss counts",
-      &naive_dl1_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dl2", "naive L2 D-cache miss counts",
-      &naive_dl2_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_dtlb", "naive D-TLB miss counts",
-      &naive_dtlb_miss_count, /* initial value */0, /* format */NULL);
-  stat_reg_counter(sdb, "naive_bpenalty", "naive branch mispredict penalty counts",
-      &naive_branch_mispred_count, /* initial value */0, /* format */NULL);
-
 //  stat_reg_formula(sdb, "fmt_il1_miss_count", "FMT L1 I-cache miss miss_count",
 //      "fmt_il1_miss_count / sim_num_insn", NULL);
 //  stat_reg_formula(sdb, "FMT_il2_miss_count", "FMT L2 I-cache miss miss_count",
@@ -1536,6 +1532,36 @@ sim_reg_stats(struct stat_sdb_t *sdb)   /* stats database */
       &sfmt_bpenalty_count, /* initial value */0, /* format */NULL);
   stat_reg_counter(sdb, "sFMT_funct_stall", "sFMT functional unit stall counts",
       &sfmt_funct_stall_count, /* initial value */0, /* format */NULL);
+
+  stat_reg_counter(sdb, "naive_il1", "naive L1 I-cache miss counts",
+      &naive_il1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_il2", "naive L2 I-cache miss counts",
+      &naive_il2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_itlb", "naive I-TLB miss counts",
+      &naive_itlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dl1", "naive L1 D-cache miss counts",
+      &naive_dl1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dl2", "naive L2 D-cache miss counts",
+      &naive_dl2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_dtlb", "naive D-TLB miss counts",
+      &naive_dtlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_bpenalty", "naive branch mispredict penalty counts",
+      &naive_branch_mispred_count, /* initial value */0, /* format */NULL);
+
+  stat_reg_counter(sdb, "naive_non_spec_il1", "naive_non_spec L1 I-cache miss counts",
+      &naive_non_spec_il1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_il2", "naive_non_spec L2 I-cache miss counts",
+      &naive_non_spec_il2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_itlb", "naive_non_spec I-TLB miss counts",
+      &naive_non_spec_itlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_dl1", "naive_non_spec L1 D-cache miss counts",
+      &naive_non_spec_dl1_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_dl2", "naive_non_spec L2 D-cache miss counts",
+      &naive_non_spec_dl2_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_dtlb", "naive_non_spec D-TLB miss counts",
+      &naive_non_spec_dtlb_miss_count, /* initial value */0, /* format */NULL);
+  stat_reg_counter(sdb, "naive_non_spec_bpenalty", "naive_non_spec branch mispredict penalty counts",
+      &naive_non_spec_bmispred_count, /* initial value */0, /* format */NULL);
 
   /* register cache stats */
   if (cache_il1
@@ -1765,6 +1791,8 @@ struct RUU_station {
   int idep_ready[MAX_IDEPS];		/* input operand ready? */
   int backend_miss_flag; /* D-cache/D-TLB miss bit for sFMT */
   int frontend_miss_flag; /* I-cache/I-TLB miss bit for sFMT */
+
+  counter_t naive_non_spec_flag;
 };
 
 /* non-zero if all register operands are ready, update with MAX_IDEPS */
@@ -2453,6 +2481,13 @@ ruu_commit(void)
         }
       }
 
+      if (LSQ[LSQ_head].backend_miss_flag & L1_CACHE_MISS)
+        naive_non_spec_dl1_miss_count++;
+      if (LSQ[LSQ_head].backend_miss_flag & L2_CACHE_MISS)
+        naive_non_spec_dl2_miss_count++;
+      if (LSQ[LSQ_head].backend_miss_flag & TLB_MISS)
+        naive_non_spec_dtlb_miss_count++;
+
       /* invalidate load/store operation instance */
       LSQ[LSQ_head].tag++;
       sim_slip += (sim_cycle - LSQ[LSQ_head].slip);
@@ -2530,6 +2565,14 @@ ruu_commit(void)
       }
     }
 
+    if (RUU[RUU_head].naive_non_spec_flag & IL1_CACHE_MISS)
+      naive_non_spec_il1_miss_count++;
+    if (RUU[RUU_head].naive_non_spec_flag & IL2_CACHE_MISS)
+      naive_non_spec_il2_miss_count++;
+    if (RUU[RUU_head].naive_non_spec_flag & ITLB_MISS)
+      naive_non_spec_itlb_miss_count++;
+    if (RUU[RUU_head].naive_non_spec_flag & BRANCH_MISPRED)
+      naive_non_spec_bmispred_count++;
 
     /* invalidate RUU operation instance */
     RUU[RUU_head].tag++;
@@ -2661,9 +2704,6 @@ ruu_recover(int branch_index)			/* index of mis-pred branch */
       LSQ_index = (LSQ_index + (LSQ_size-1)) % LSQ_size;
       LSQ_num--;
     }
-
-    if (MD_OP_FLAGS(RUU[RUU_index].op) & F_CTRL)
-      naive_non_spec_bmispred_count--;
 
     /* recover any resources used by this RUU operation */
     for (i=0; i<MAX_ODEPS; i++)
@@ -3076,7 +3116,7 @@ ruu_issue(void)
                     cache_access(cache_dl1, Read,
                         (rs->addr & ~3), NULL, 4,
                         sim_cycle, NULL, NULL);
-                  if (load_lat > cache_dl1_lat)
+                  if (load_lat > cache_dl1_lat) 
                     events |= PEV_CACHEMISS;
                 }
                 else
@@ -3095,8 +3135,9 @@ ruu_issue(void)
                 tlb_lat =
                   cache_access(dtlb, Read, (rs->addr & ~3),
                       NULL, 4, sim_cycle, NULL, NULL);
-                if (tlb_lat > 1)
+                if (tlb_lat > 1) {
                   events |= PEV_TLBMISS;
+                }
 
                 /* D-cache/D-TLB accesses occur in parallel */
                 load_lat = MAX(tlb_lat, load_lat);
@@ -3105,14 +3146,17 @@ ruu_issue(void)
               if (dl2_misses < cache_dl2->misses) {
                 rs->backend_miss_flag = L2_CACHE_MISS;
                 naive_dl2_miss_count++;
+                rs->naive_non_spec_flag |= DL2_CACHE_MISS;
               }
               else if (dl1_misses < cache_dl1->misses) {
                 rs->backend_miss_flag = L1_CACHE_MISS;
                 naive_dl1_miss_count++;
+                rs->naive_non_spec_flag |= DL1_CACHE_MISS;
               }
               else if (dtlb_misses < dtlb->misses) {
                 rs->backend_miss_flag |= TLB_MISS;
                 naive_dtlb_miss_count++;
+                rs->naive_non_spec_flag |= DTLB_MISS;
               }
               else
                 rs->backend_miss_flag = CACHE_HIT;
@@ -3302,6 +3346,8 @@ struct fetch_rec {
   struct bpred_update_t dir_update;	/* bpred direction update info */
   int stack_recover_idx;		/* branch predictor RSB index */
   unsigned int ptrace_seq;		/* print trace sequence id */
+
+  counter_t naive_non_spec_flag;
 };
 static struct fetch_rec *fetch_data;	/* IFETCH -> DISPATCH inst queue */
 static int fetch_num;			/* num entries in IF -> DIS queue */
@@ -4072,6 +4118,7 @@ ruu_dispatch(void)
   qword_t temp_qword = 0;		/* " ditto " */
 #endif /* HOST_HAS_QWORD */
   enum md_fault_type fault;
+  int fetch_miss_flag;
 
   made_check = FALSE;
   n_dispatched = 0;
@@ -4103,6 +4150,7 @@ ruu_dispatch(void)
     dir_update_ptr = &(fetch_data[fetch_head].dir_update);
     stack_recover_idx = fetch_data[fetch_head].stack_recover_idx;
     pseq = fetch_data[fetch_head].ptrace_seq;
+    fetch_miss_flag = fetch_data[fetch_head].naive_non_spec_flag;
 
     /* decode the inst */
     MD_SET_OPCODE(op, inst);
@@ -4299,6 +4347,7 @@ ruu_dispatch(void)
       else {
         rs->frontend_miss_flag = FALSE;
       }
+      rs->naive_non_spec_flag = fetch_miss_flag;
 
       /* split ld/st's into two operations: eff addr comp + mem access */
       if (MD_OP_FLAGS(op) & F_MEM)
@@ -4465,6 +4514,7 @@ ruu_dispatch(void)
         spec_mode = TRUE;
         rs->recover_inst = TRUE;
         recover_PC = regs.regs_NPC;
+        rs->naive_non_spec_flag |= BRANCH_MISPRED;
       }
     }
 
@@ -4604,6 +4654,7 @@ ruu_fetch(void)
   {
     /* fetch an instruction at the next predicted fetch address */
     fetch_regs_PC = fetch_pred_PC;
+    non_spec_last_fetch_miss_flag = non_spec_fetch_miss_flag;
 
     /* is this a bogus text address? (can happen on mis-spec path) */
     if (1 || ld_text_base <= fetch_regs_PC
@@ -4655,18 +4706,22 @@ ruu_fetch(void)
           // L2 I-cache miss
           frontend_miss_flag = L2_CACHE_MISS;
           naive_il2_miss_count++;
+          non_spec_fetch_miss_flag |= IL2_CACHE_MISS;
         }
         else if (il1_misses < cache_il1->misses) {
           frontend_miss_flag = L1_CACHE_MISS;
           naive_il1_miss_count++;
+          non_spec_fetch_miss_flag |= IL1_CACHE_MISS;
         }
         if (last_inst_tmissed) {
           frontend_miss_flag |= TLB_MISS;
           naive_itlb_miss_count++;
+          non_spec_fetch_miss_flag |= ITLB_MISS;
         }
         break;
       }
       /* else, I-cache/I-TLB hit */
+      non_spec_fetch_miss_flag = CACHE_HIT;
     }
     else
     {
@@ -4745,6 +4800,7 @@ ruu_fetch(void)
     fetch_data[fetch_tail].pred_PC = fetch_pred_PC;
     fetch_data[fetch_tail].stack_recover_idx = stack_recover_idx;
     fetch_data[fetch_tail].ptrace_seq = ptrace_seq++;
+    fetch_data[fetch_tail].naive_non_spec_flag = non_spec_last_fetch_miss_flag;
 
     /* for pipe trace */
     ptrace_newinst(fetch_data[fetch_tail].ptrace_seq,

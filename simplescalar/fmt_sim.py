@@ -8,23 +8,30 @@ ff = '2B'
 max_inst = 1000000000 # 1B
 mi = '1B' 
 config = './config/oo-fmt.cfg'
-n_stack = 3 # naive, FMT, sFMT
+n_stack = 4 # naive, naive_non_spec, FMT, sFMT
 
 fmt_stat_tags = [ "FMT_il1", "FMT_il2", "FMT_itlb", "FMT_dl1", "FMT_dl2", "FMT_dtlb", "FMT_bpenalty" ]
 sfmt_stat_tags = [ "sFMT_il1", "sFMT_il2", "sFMT_itlb", "sFMT_dl1", "sFMT_dl2", "sFMT_dtlb", "sFMT_bpenalty" ]
-naive_stat_tags = [ "il1.misses", "ul2.misses", "itlb.misses", "dl1.misses", "dtlb.misses", "naive_bpenalty" ]
-# naive_stats = [ "naive_il1", "naive_il2", "naive_itlb", "naive_dl1", "naive_dl2", "naive_dtlb", "naive_bpenalty" ]
-naive_penalty = { "il1.misses" : 9, "ul2.misses" : 250, "itlb.misses" : 30,
-                  "dl1.misses" : 9, "dtlb.misses" : 30,
+# naive_stat_tags = [ "il1.misses", "ul2.misses", "itlb.misses", "dl1.misses", "dtlb.misses", "naive_bpenalty" ]
+naive_stat_tags = [ "naive_il1", "naive_il2", "naive_itlb", "naive_dl1", "naive_dl2", "naive_dtlb", "naive_bpenalty" ]
+naive_non_spec_stat_tags = [ "naive_non_spec_il1", "naive_non_spec_il2", "naive_non_spec_itlb", "naive_non_spec_dl1", "naive_non_spec_dl2", "naive_non_spec_dtlb", "naive_non_spec_bpenalty" ]
+naive_penalty = { "naive_il1" : 9, "naive_il2" : 250, "naive_itlb" : 30,
+                  "naive_dl1" : 9, "naive_dl2" : 250, "naive_dtlb" : 30, 
                   "naive_bpenalty" : 5 }
+naive_non_spec_penalty = { "naive_non_spec_il1" : 9, "naive_non_spec_il2" : 250, "naive_non_spec_itlb" : 30,
+                  "naive_non_spec_dl1" : 9, "naive_non_spec_dl2" : 250, "naive_non_spec_dtlb" : 30, 
+                  "naive_non_spec_bpenalty" : 5 }
+#naive_penalty = { "il1.misses" : 9, "ul2.misses" : 250, "itlb.misses" : 30,
+#                  "dl1.misses" : 9, "dtlb.misses" : 30,
+#                  "naive_bpenalty" : 5 }
 
 spec_bm = [ "bzip2", "gcc", "gromacs", "mcf" ]
 
 bin_files = {
         "bzip2" : "../spec_alpha/bzip2/bzip2_base.alpha",
         "gcc" : "../spec_alpha/gcc/gcc.alpha",
-        "gromacs" : "../spec_alpha/gromacs/gromacs_base.alpha"
-        "mcf" : "../spec_alpha/mch/mcf_base.alpha"
+        "gromacs" : "../spec_alpha/gromacs/gromacs_base.alpha",
+        "mcf" : "../spec_alpha/mcf/mcf_base.alpha"
 # "zeusmp" : "../spec_alpha/zeusmp/zeusmp_base.alpha"
         }
 
@@ -64,7 +71,7 @@ input_tags = {
             "liberty_jpg",
             "input_program",
             "text_html",
-            "input_combined",
+            "input_combined"
             ],
 
         "gcc": [
@@ -95,28 +102,34 @@ def get_cpi_stack():
     fmt_base = [1 for i in range(len(sim_cycle))]
     sfmt_base = [1 for i in range(len(sim_cycle))]
     naive_base = [1 for i in range(len(sim_cycle))]
+    naive_non_spec_base = [1 for i in range(len(sim_cycle))]
     stat["FMT_base"] = [] 
     for tag in fmt_stat_tags:
         s = stat[tag]
         stat[f'{tag}_rate'] = [float(x / y) for x, y in zip(s, sim_cycle)]  
-# print(f'{tag}_rate :', stat[f'{tag}_rate'])
+        print(f'{tag}_rate :', stat[f'{tag}_rate'])
         fmt_base = [x - y for x, y in zip(fmt_base, stat[f'{tag}_rate'])]
     stat["FMT_base"] = [] 
     for tag in sfmt_stat_tags:
         s = stat[tag]
         stat[f'{tag}_rate'] = [float(x / y) for x, y in zip(s, sim_cycle)]  
         sfmt_base = [x - y for x, y in zip(sfmt_base, stat[f'{tag}_rate'])]
-# print(f'{tag}_rate :', stat[f'{tag}_rate'])
+        print(f'{tag}_rate :', stat[f'{tag}_rate'])
     stat["FMT_base"] = [] 
     for tag in naive_stat_tags:
         s = stat[tag]
         stat[f'{tag}_rate'] = [float(x / y)*naive_penalty[tag] for x, y in zip(s, sim_cycle)]  
         naive_base = [x - y for x, y in zip(naive_base, stat[f'{tag}_rate'])]
-# print(f'{tag}_rate :', stat[f'{tag}_rate'])
+    for tag in naive_non_spec_stat_tags:
+        s = stat[tag]
+        stat[f'{tag}_rate'] = [float(x / y)*naive_non_spec_penalty[tag] for x, y in zip(s, sim_cycle)]  
+        naive_non_spec_base = [x - y for x, y in zip(naive_non_spec_base, stat[f'{tag}_rate'])]
+        print(f'{tag}_rate :', stat[f'{tag}_rate'])
     stat["FMT_base"] = fmt_base
     stat["sFMT_base"] = sfmt_base
     stat["naive_base"] = naive_base
-# print(stat)
+    stat["naive_non_spec_base"] = naive_non_spec_base
+    print(stat)
     
 
 def run_fmt_sim():
@@ -127,8 +140,8 @@ def run_fmt_sim():
         itags = input_tags[bm]
         for i in range(len(ifs)):
             fstat = f'./stats/{bm}_{itags[i]}_{ff}_{mi}.stats'
-# if os.path.exists(fstat):
-# continue
+            if os.path.exists(fstat):
+                continue
             cmd = f'./{sim} -config {config} -fastfwd {fastfwd} -max:inst {max_inst} -redir:sim {fstat} {bf} {ifs[i]}'
             fail = os.system(cmd)
             if fail:
@@ -139,6 +152,8 @@ def print_stat():
     stat["workload"] = []
     stat["sim_cycle"] = []
     for tag in naive_stat_tags:
+        stat[tag] = []
+    for tag in naive_non_spec_stat_tags:
         stat[tag] = []
     for tag in fmt_stat_tags:
         stat[tag] = []
@@ -164,10 +179,13 @@ def print_stat():
                 for tag in naive_stat_tags:
                     if tag in l:
                         stat[tag].append(int(words[1]))
+                for tag in naive_non_spec_stat_tags:
+                    if tag in l:
+                        stat[tag].append(int(words[1]))
     cpi_stack = get_cpi_stack()
 
-# for key in stat.keys():
-# print(key, len(stat[key]))
+    for key in stat.keys():
+        print(key, len(stat[key]))
 
     excel_path = f'./stats/fmt.xlsx'
     df = pd.DataFrame(stat)
