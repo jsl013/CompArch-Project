@@ -64,9 +64,9 @@ input_tags = {
         "mcf": ["inp"]
         }
 
-stat = { "IPC" : [], "Origin" : [], "1:1 MSHR" : [], "4:2 MSHR" : [], "4:4 MSHR" : [] }
+stat = { "IPC" : [], "Origin" : [], "2:2 MSHR" : [], "4:2 MSHR" : [], "8:4 MSHR" : [] }
 
-mshr_opt = ["0:0", "1:1", "4:2", "4:4"]
+mshr_opt = ["0:0", "2:2", "4:2", "8:4"]
 
 def run_mshr_sim():
     print(" **** Start MSHR Simulation **** ")
@@ -77,8 +77,8 @@ def run_mshr_sim():
         for i in range(len(ifs)):
             for opt in mshr_opt: # 0:0 = original simplescalar
                 fstat = f'./stats/{bm}_{itags[i]}_mshr_{opt}.stats'
-                if os.path.exists(fstat):
-                    continue
+# if os.path.exists(fstat):
+# continue
                 cmd = f'./{sim} -config {config} -fastfwd {fastfwd} -max:inst {max_inst} -cache:mshr {opt} -redir:sim {fstat} {bf} {ifs[i]}'
                 fail = os.system(cmd)
                 if fail:
@@ -94,12 +94,12 @@ def print_stat():
             for opt in mshr_opt:
                 if opt == "0:0":
                     stat_name = "Origin"
-                if opt == "1:1":
-                    stat_name = "1:1 MSHR"
+                if opt == "2:2":
+                    stat_name = "2:2 MSHR"
                 if opt == "4:2":
                     stat_name = "4:2 MSHR"
-                if opt == "4:4":
-                    stat_name = "4:4 MSHR"
+                if opt == "8:4":
+                    stat_name = "8:4 MSHR"
                 fstat = f'./stats/{bm}_{it}_mshr_{opt}.stats'
                 f = open(fstat, "r")
                 lines = f.readlines()

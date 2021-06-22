@@ -255,6 +255,10 @@ update_way_list(struct cache_set_t *set,	/* set contained way chain */
     panic("bogus WHERE designator");
 }
 
+extern counter_t structural_stall;
+extern counter_t primary_miss;
+extern counter_t secondary_miss;
+
 /* create and initialize a general cache structure */
 struct cache_t *			/* pointer to cache created */
 cache_create(char *name,		/* name of the cache */
@@ -368,6 +372,10 @@ cache_create(char *name,		/* name of the cache */
     cp->mshr[i].bvalid = 0;
     cp->mshr[i].nalloc = 0;
   }
+
+  primary_miss = 0;
+  secondary_miss = 0;
+  structural_stall = 0;
 
   /* slice up the data blocks */
   for (bindex=0,i=0; i<nsets; i++)
@@ -618,6 +626,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
       target_mshr->baddr = tagset;
       target_mshr->nalloc = 1;
       cp->mshr_nalloc++;
+      primary_miss++;
     }
     else { /* structural-stall miss, all MSHR entries are busy */
       int min_t_return = cp->mshr[0].t_return;
@@ -627,6 +636,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
       }
       cp->t_blk_resolved = min_t_return;
       lat = CACHE_BLKED;
+      structural_stall++;
       return lat;
     }
   }
@@ -696,6 +706,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
       target_mshr->bvalid = 0; // bvalid init! cache_create
       target_mshr->nalloc = 0;
       cp->mshr_nalloc--;
+      primary_miss--;
     }
     return CACHE_BLKED;
   }
@@ -806,9 +817,11 @@ mshr_hit:
     /* secondary miss */
     curr_mshr->nalloc++;
     lat = BOUND_POS(curr_mshr->t_return - now);
+    secondary_miss++;
   }
   else { /* structural-stall miss */
     lat = CACHE_BLKED;
+    structural_stall++;
   }
   return lat;
 }

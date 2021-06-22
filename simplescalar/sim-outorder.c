@@ -4725,9 +4725,16 @@ sim_main(void)
     sim_cycle++;
 
     /* finish early? */
-    if (max_insts && sim_num_insn >= max_insts)
+    if (max_insts && sim_num_insn >= max_insts){
+      printf("primary miss : %lld\n", primary_miss);
+      printf("secondary miss : %lld\n", secondary_miss);
+      printf("structural stall : %lld\n", structural_stall);
       return;
+    }
     if (program_complete) {
+      printf("primary miss : %lld\n", primary_miss);
+      printf("secondary miss : %lld\n", secondary_miss);
+      printf("structural stall : %lld\n", structural_stall);
       return;
     }
   }

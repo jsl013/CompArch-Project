@@ -148,6 +148,10 @@ struct cache_set_t
 				   access to cache blocks */
 };
 
+counter_t primary_miss;
+counter_t secondary_miss;
+counter_t structural_stall;
+
 #define CACHE_BLKED -1
 
 struct mshr_t /* explicitly addressed MSHR */
