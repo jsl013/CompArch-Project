@@ -555,9 +555,11 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* check for a fast hit: access to same block */
   if (IS_CACHE_FAST_HIT(cp, addr) && (cp->last_blk != NULL))
   {
-    /* hit in the same block */
-    blk = cp->last_blk;
-    goto cache_fast_hit;
+    if (!(cp->nmshr && (cp->last_blk->ready > now))) {
+      /* hit in the same block */
+      blk = cp->last_blk;
+      goto cache_fast_hit;
+    }
   }
 
   if (cp->hsize)
@@ -570,7 +572,8 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk=blk->hash_next)
     {
       if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
-        goto cache_hit;
+        if (!(cp->nmshr && (blk->ready > now)))
+          goto cache_hit;
     }
   }
   else
@@ -581,7 +584,8 @@ cache_access(struct cache_t *cp,	/* cache to access */
         blk=blk->way_next)
     {
       if (blk->tag == tag && (blk->status & CACHE_BLK_VALID))
-        goto cache_hit;
+        if (!(cp->nmshr && (blk->ready > now)))
+          goto cache_hit;
     }
   }
 
@@ -688,21 +692,12 @@ cache_access(struct cache_t *cp,	/* cache to access */
   /* Even though it is primary miss, L2 D-cache access can be structural stall because it is unified cache */
   if (cp->blk_access_fn(Read, CACHE_BADDR(cp, addr), cp->bsize, repl, now+lat) == CACHE_BLKED) {
     /* reset the MSHR entry allocated */
-/* for (i=0; i<cp->nmshr; ++i) { */
-/* curr_mshr = &(cp->mshr[i]); */
-/* if (curr_mshr->bvalid && curr_mshr->baddr == CACHE_TAGSET(cp, addr)) { */
-/* curr_mshr->bvalid = 0; */
-/* curr_mshr->nalloc = 0; */
-/* cp->mshr_nalloc--; */
-/* } */
-/* } */
     if (cp->nmshr) {
       target_mshr->bvalid = 0; // bvalid init! cache_create
       target_mshr->nalloc = 0;
       cp->mshr_nalloc--;
     }
     return CACHE_BLKED;
-    panic("NO WAY!!");
   }
   lat += cp->blk_access_fn(Read, CACHE_BADDR(cp, addr), cp->bsize,
       repl, now+lat);
